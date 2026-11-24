@@ -182,7 +182,7 @@ pub fn hint_for_scope(scope: &str) -> Option<&'static str> {
     Some(match scope {
         s if s.starts_with("quota.") => "fdt org usage (y sube de plan en el panel)",
         "deploy.workflow_missing" => {
-            "fdt service install-workflow <servicio> --mode pull_request (y fusiona el pull request), o --mode commit"
+            "fdt service install-workflow <servicio> (--mode commit: commit directo y luego git pull; --mode pull_request: fusiona el pull request)"
         }
         "deploy.permission_missing" => {
             "acepta los permisos nuevos de la GitHub App de Foundathyon en GitHub y vuelve a intentarlo"

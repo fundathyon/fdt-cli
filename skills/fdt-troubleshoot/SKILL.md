@@ -2,7 +2,7 @@
 name: fdt-troubleshoot
 description: Diagnostica un deploy que falló o un servicio caído en Foundathyon con `fdt`: `service diagnose`, `deploys`, logs de los jobs del build en GitHub Actions y `logs` de ejecución. Incluye árbol de decisión por código de salida y `error.scope` (también `quota.*` y `cli.*`). Actívala cuando `fdt deploy --wait` salga con 7 u 8, un servicio no levante, se quede en awaiting_first_deploy, devuelva 5xx, o la persona pregunte "por qué no despliega" o "por qué está caído".
 metadata:
-  version: "0.3.0"
+  version: "0.4.0"
   owner: fundathyon
 ---
 
@@ -37,7 +37,7 @@ fdt logs tienda-web --since 2026-11-23T10:00:00Z --until 2026-11-23T10:15:00Z --
 | `workflow_inputs`: `*_mismatch`, `inputs_missing`, `token_not_a_secret` | el YAML no coincide con el servicio | `fdt service setup tienda-web --write-workflow` y commit (reemplaza el archivo) |
 | `workflow_trigger`: `branch_mismatch`, `no_push_trigger` | el `on:` no dispara con la rama | reescribir el workflow como arriba |
 | `dockerfile_present`: `not_found`, `dockerfile_mismatch` | Dockerfile no está donde dice el servicio | crearlo, o `fdt service update tienda-web --dockerfile <ruta> --build-context <dir>` |
-| `registry_token`: `never_created` / `created_never_used` | el secreto del repo no tiene el token | pedir permiso y `fdt service rotate-registry-token tienda-web --confirm tienda-web --output <archivo>` (revoca el anterior; la persona pone el archivo en el secreto `FOUNDATHYON_REGISTRY_TOKEN`), o reinstalar el workflow, que también guarda el secreto |
+| `registry_token`: `never_created` / `created_never_used` | el secreto del repo no tiene el token | pedir permiso y `fdt service rotate-registry-token tienda-web --confirm tienda-web-acme --output <archivo>` (revoca el anterior; la persona pone el archivo en el secreto `FOUNDATHYON_REGISTRY_TOKEN`), o reinstalar el workflow, que también guarda el secreto |
 | `workflow_run`: `failed` | falló el build | pasos 3 y 4 de arriba |
 | `workflow_run`: `never_ran` | Actions deshabilitado o sin push | `fdt deploy tienda-web --wait` lanza el workflow |
 | `image_pushed`: `run_ok_but_no_image` | el build pasó pero no llegó imagen | revisa el log del job (login al registry) |

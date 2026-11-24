@@ -1351,7 +1351,8 @@ async fn service_create_dry_run_shows_the_body_it_sends_and_the_real_url() {
     assert_eq!(plan["body"]["port"], 3000);
     assert_eq!(plan["body"]["memory_mb"], 256);
     assert_eq!(plan["body"]["subdomain"], "web");
-    assert_eq!(plan["body"]["workflow_mode"], "pull_request");
+    assert_eq!(plan["body"]["workflow_mode"], "commit");
+    assert!(run.stderr.contains("git pull"), "{}", run.stderr);
     // configure puts the org suffix after the chosen part: that is the real URL.
     assert_eq!(plan["url"], "https://web-acme.foundathyon.dev");
     assert_eq!(plan["url_certain"], true);
@@ -1433,10 +1434,10 @@ async fn service_create_goes_through_configure_like_the_panel() {
     Mock::given(method("POST"))
         .and(path(format!("/organizations/{ORG}/apps/app1/deploy/configure")))
         .and(body_json(json!({"subdomain": "tienda-web", "port": 3000, "memory_mb": 256,
-            "auto_deploy": false, "workflow_mode": "pull_request"})))
+            "auto_deploy": false, "workflow_mode": "commit"})))
         .respond_with(ResponseTemplate::new(201).set_body_json(json!({"success": true, "status_code": 201, "data": {
             "service": {"id": SVC, "slug": "tienda-web-acme", "url": "https://tienda-web-acme.foundathyon.dev", "app_id": "app1"},
-            "workflow": {"mode": "pull_request", "status": "pull_request_open", "pull_request_url": "https://github.com/acme/web/pull/7"}}})))
+            "workflow": {"mode": "commit", "status": "committed", "commit_sha": "abcdef0123"}}})))
         .expect(1)
         .mount(&env.server)
         .await;
@@ -1445,8 +1446,8 @@ async fn service_create_goes_through_configure_like_the_panel() {
     let out = run.json();
     assert_eq!(out["slug"], "tienda-web-acme");
     assert_eq!(out["created"], true);
-    assert_eq!(out["workflow"]["status"], "pull_request_open");
-    assert!(run.stderr.contains("pull/7"), "{}", run.stderr);
+    assert_eq!(out["workflow"]["status"], "committed");
+    assert!(run.stderr.contains("abcdef0") && run.stderr.contains("git pull"), "{}", run.stderr);
 }
 
 #[tokio::test]
@@ -1735,4 +1736,46 @@ async fn confirmation_at_end_of_input_cancels_with_exit_2() {
     let run = env.run_with(&["project", "delete", "tienda"], &[("FDT_TOKEN", TOKEN)], Some("")).await;
     assert_eq!(run.code, 2);
     assert!(started.elapsed() < std::time::Duration::from_secs(10));
+}
+
+#[tokio::test]
+async fn service_create_workflow_modes_in_dry_run() {
+    let env = Env::new().await.with_org().await;
+    Mock::given(method("GET"))
+        .and(path(format!("/organizations/{ORG}/apps")))
+        .respond_with(ok(json!([{"id": "app1", "name": "web", "repository": {"full_name": "acme/web"}}])))
+        .mount(&env.server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path(format!("/organizations/{ORG}/deploy/services")))
+        .respond_with(ok(json!([])))
+        .mount(&env.server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path(format!("/organizations/{ORG}/deploy/subdomain")))
+        .respond_with(ok(json!({"suffix": "acme", "domain": "foundathyon.dev"})))
+        .mount(&env.server)
+        .await;
+    let default = env.run(&["service", "create", "web", "--repo", "acme/web", "--dry-run"]).await;
+    assert_eq!(default.json()["body"]["workflow_mode"], "commit");
+    assert!(default.stderr.contains("git pull") && default.stderr.contains("primer build"), "{}", default.stderr);
+    let pr = env.run(&["service", "create", "web", "--repo", "acme/web", "--workflow-mode", "pull_request", "--dry-run"]).await;
+    assert_eq!(pr.json()["body"]["workflow_mode"], "pull_request");
+    assert!(pr.stderr.contains("pull request"), "{}", pr.stderr);
+    let manual = env.run(&["service", "create", "web", "--repo", "acme/web", "--workflow-mode", "manual", "--dry-run"]).await;
+    assert_eq!(manual.json()["body"]["workflow_mode"], "manual");
+}
+
+#[tokio::test]
+async fn install_workflow_defaults_to_commit_when_the_service_is_manual() {
+    let env = Env::new().await.with_org().await;
+    Mock::given(method("GET"))
+        .and(path(format!("/organizations/{ORG}/deploy/services")))
+        .respond_with(ok(json!([{"id": SVC, "slug": "web-acme", "app_id": "app1", "workflow_mode": "manual", "branch": "main"}])))
+        .mount(&env.server)
+        .await;
+    let run = env.run(&["service", "install-workflow", "web-acme", "--dry-run"]).await;
+    assert_eq!(run.code, 0, "{}", run.stderr);
+    assert_eq!(run.json()["body"]["workflow_mode"], "commit");
+    assert!(run.stderr.contains("git pull"), "{}", run.stderr);
 }

@@ -380,7 +380,7 @@ pub async fn create(ctx: &Ctx, a: ServiceCreate) -> Result<()> {
             ));
         }
         match a.workflow_mode.as_str() {
-            "commit" => ui::warn("Con --workflow-mode commit Core hace commit del workflow en la rama: ese push lanza el primer build (con auto_deploy) y tu copia local queda atrás."),
+            "commit" => ui::warn("Con --workflow-mode commit Core hace commit del workflow en la rama: ese push lanza el primer build (con auto_deploy; el Dockerfile debe estar ya en la rama) y tu copia local queda atrás: haz git pull."),
             "pull_request" => ui::info("Con --workflow-mode pull_request Core abre un pull request con el workflow; el primer build llega al fusionarlo."),
             _ => ui::info("Con --workflow-mode manual Core no toca GitHub: después, fdt service install-workflow."),
         }
@@ -408,14 +408,14 @@ pub async fn create(ctx: &Ctx, a: ServiceCreate) -> Result<()> {
     let slug = s(service, "slug");
     ui::success(&format!("Servicio «{slug}» creado: {}", s(service, "url")));
     match workflow["status"].as_str().unwrap_or_default() {
-        "committed" => ui::info(&format!("Workflow en la rama {} (commit {}): el build arranca solo; síguelo con fdt deploys {slug}.", s(service, "branch"), path(workflow, "commit_sha").chars().take(7).collect::<String>())),
+        "committed" => ui::info(&format!("Workflow en la rama {} (commit {}): el build arranca solo; síguelo con fdt deploys {slug}. Tu copia local queda atrás: haz git pull.", s(service, "branch"), path(workflow, "commit_sha").chars().take(7).collect::<String>())),
         "pull_request_open" => ui::info(&format!("Pull request con el workflow: {}. Al fusionarlo llega el primer build (fdt deploys {slug}).", s(workflow, "pull_request_url"))),
         "failed" => ui::warn(&format!(
-            "El servicio quedó creado, pero GitHub no aceptó el workflow: {} ({}). Reintenta con fdt service install-workflow {slug} --mode pull_request · fdt service diagnose {slug}",
+            "El servicio quedó creado, pero GitHub no aceptó el workflow: {} ({}). Reintenta con fdt service install-workflow {slug} --mode pull_request (o --mode commit) · fdt service diagnose {slug}",
             path(workflow, "error.message"),
             path(workflow, "error.code")
         )),
-        _ => ui::info(&format!("Siguiente: fdt service install-workflow {slug} --mode pull_request, y fdt deploy {slug}")),
+        _ => ui::info(&format!("Siguiente: fdt service install-workflow {slug} (sube antes el Dockerfile; con --mode commit haz después git pull), y fdt deploy {slug}")),
     }
     let mut out = service.clone();
     out["workflow"] = workflow.clone();
@@ -523,9 +523,9 @@ pub async fn install_workflow(ctx: &Ctx, query: Option<String>, mode: Option<Str
     let service = ctx.service(&api, &org, query.as_deref()).await?;
     let path_ = format!("{}/workflow", service_path(&org.id, &resolve::id(&service)));
     // Without --mode, the mode the service already has (commit or
-    // pull_request); manual has no install, so pull_request.
+    // pull_request); manual has no install, so commit (the panel's default).
     let configured = service["workflow_mode"].as_str().filter(|m| matches!(*m, "commit" | "pull_request"));
-    let mode = mode.or_else(|| configured.map(str::to_owned)).unwrap_or_else(|| "pull_request".to_owned());
+    let mode = mode.or_else(|| configured.map(str::to_owned)).unwrap_or_else(|| "commit".to_owned());
     if let Some(current) = configured
         && current != mode
     {

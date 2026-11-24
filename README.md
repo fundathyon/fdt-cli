@@ -12,41 +12,90 @@ público (`https://api.foundathyon.com/core/api/v1`).
 ## Instalar
 
 ```sh
-# Linux y macOS (instala en ~/.local/bin; FDT_INSTALL_DIR para otro lugar)
+# macOS y Linux (cualquier distro; x86_64 o arm64). Instala en ~/.local/bin, sin sudo.
 curl -fsSL https://github.com/fundathyon/fdt-cli/releases/latest/download/install.sh | sh
-
-# Windows (instala en %LOCALAPPDATA%\fdt\bin y lo agrega al PATH del usuario)
-irm https://github.com/fundathyon/fdt-cli/releases/latest/download/install.ps1 | iex
-
-# Desde el código
-cargo install --path .
 ```
 
-Los instaladores comprueban el SHA256 contra `SHA256SUMS` de la release.
-`fdt update` reemplaza el binario por la última release (`fdt update --check`
-solo avisa). Autocompletado: `fdt completions zsh > ~/.zfunc/_fdt`.
+```powershell
+# Windows (PowerShell). Instala en %LOCALAPPDATA%\fdt\bin y lo agrega a tu PATH de usuario.
+irm https://github.com/fundathyon/fdt-cli/releases/latest/download/install.ps1 | iex
+```
+
+Comprueba con `fdt --version`. Si el instalador avisa de que el directorio no
+está en tu `PATH`, ejecuta la línea que te sugiere y abre una terminal nueva.
+
+Opciones, como variables de entorno en los dos instaladores:
+
+| Variable | Para qué |
+|---|---|
+| `FDT_INSTALL_DIR` | Otro directorio de instalación |
+| `FDT_INSTALL_VERSION` | Una versión concreta, p. ej. `v0.1.0` (por defecto la última) |
+
+Los instaladores verifican el SHA256 del archivo contra `SHA256SUMS` de la
+release y no instalan nada si no coincide. También puedes descargar a mano el
+archivo de tu plataforma desde
+[Releases](https://github.com/fundathyon/fdt-cli/releases).
+
+Plataformas: macOS (Apple silicon e Intel), Linux x86_64 y arm64 (binario
+estático) y Windows x64. En otras, compílalo:
+`cargo install --git https://github.com/fundathyon/fdt-cli`.
+
+**Actualizar:** `fdt update` descarga la última release, verifica su SHA256 y
+reemplaza el binario; `fdt update --check` solo avisa.
+
+Autocompletado: `fdt completions zsh > ~/.zfunc/_fdt`.
 
 ## Primeros pasos
 
 ```sh
 fdt login                 # muestra un código, abre el panel y espera tu aprobación
 fdt use acme              # organización por defecto de esta máquina
-cd ~/code/tienda-api
-fdt link --project tienda --service api   # escribe .fdt.toml en la raíz del repo
+cd ~/code/tienda-web
+fdt link --project tienda --service tienda-web   # escribe .fdt.toml (el servicio tiene que ser del proyecto)
 fdt status                # servicios, último deploy y bases del proyecto
 ```
 
 Llevar un repo a producción:
 
 ```sh
-fdt service create api --project tienda --repo acme/tienda-api --size 512 --port 3000 --if-not-exists
-fdt service install-workflow api --mode pull_request   # workflow de GitHub Actions + secreto del registry
+fdt service create tienda-web --project tienda --repo acme/tienda-web --if-not-exists --dry-run   # URL y memoria que deja el plan
+fdt service create tienda-web --project tienda --repo acme/tienda-web --if-not-exists
+#   → servicio tienda-web-acme (https://tienda-web-acme.foundathyon.dev), PR con el workflow y el secreto del registry
 fdt db create tienda-pg --project tienda --wait --if-not-exists
-fdt env set DATABASE_URL --from-db tienda-pg --service api   # la URL nunca se imprime
-fdt deploy api --wait
-fdt logs api --since 10m
-fdt service diagnose api      # si algo no levanta
+fdt env set DATABASE_URL --from-db tienda-pg -s tienda-web   # la URL nunca se imprime
+fdt deploy tienda-web --wait    # tras fusionar el PR del workflow
+fdt logs tienda-web --since 10m
+fdt service diagnose tienda-web      # si algo no levanta
 ```
+
+`service create` hace lo mismo que el panel (`POST …/apps/{app}/deploy/configure`):
+
+- **Subdominio**: el argumento es la primera parte; Core le añade el sufijo
+  de la organización (`tienda-web` → `tienda-web-acme`), y `--dry-run`
+  muestra la URL exacta. Sin argumento, Core lo genera a partir del repo
+  (`<repo>-<8 caracteres al azar>`) y solo se sabe al crearlo. `fdt`
+  rechaza antes de llamar un subdominio con caracteres fuera de `a-z 0-9 -`
+  o con guion en un extremo; `www`, `api`, `admin`, `app`, `db`… son de
+  Foundathyon, pero con el sufijo (`api-acme`) ya no chocan.
+- **Por defecto**: `--port 3000`, `--memory 256` (alias `--size`; el máximo
+  por servicio en Free y Starter), la rama por defecto del repo y
+  `--workflow-mode pull_request` (Core abre un PR con el workflow y guarda el
+  secreto `FOUNDATHYON_REGISTRY_TOKEN`; el primer build llega al
+  fusionarlo). `--workflow-mode commit` hace commit directo en la rama (como
+  el panel; ese push lanza el build), y `manual` no toca GitHub (luego
+  `fdt service install-workflow`). La memoria se comprueba contra los
+  tamaños del plan (`service_memory_mb_options`) antes de enviar: si no
+  cabe, sale con 6 y `quota.deploy.service_memory`.
+- **`--no-auto-deploy`**: el workflow no corre en cada push a la rama; solo
+  despliega `fdt deploy`.
+- Después, el servicio se nombra por su nombre (el de la app, es decir el del
+  repo: `tienda-web`; otro con `--name`) o por su slug (`tienda-web-acme`).
+- **Una app, un servicio**: si la app ya tiene servicio, `create` falla
+  (`fdt.service_exists`); con `--if-not-exists` lo devuelve, aunque su
+  subdominio lleve sufijo. La salida trae `created` y, al crear, `workflow`
+  (`status`: `pull_request_open`, `committed`, `failed` o `not_installed`).
+- Un token limitado a proyectos puede crear el servicio de una app de su
+  proyecto (Core lo autoriza por la app).
 
 ## Sesión y tokens
 
@@ -67,10 +116,16 @@ fdt service diagnose api      # si algo no levanta
 - `fdt logout` revoca el token en el servidor y lo borra de la máquina. Solo
   ese: los tokens que creaste con esa sesión siguen vivos.
 - Un token creado con una sesión de `fdt login` lleva `created_by_token_id`
-  (`fdt token list`). Revocar la sesión (`fdt token revoke <id>` desde otra
-  sesión, o desde el panel) revoca también esos tokens; la salida trae
-  `cascade_revoked`. Un token `scoped` no lista tokens, pero se puede revocar
+  (`fdt token list`). Revocar la sesión (`fdt token revoke <id> --confirm
+  <nombre>` desde otra sesión, o desde el panel) revoca también esos tokens;
+  la salida trae `cascade_revoked`. Revocar una sesión, y sobre todo la que
+  estás usando, exige `--confirm <nombre>` (su id si no tiene nombre), también
+  con `--dry-run`. Un token `scoped` no lista tokens, pero se puede revocar
   a sí mismo por id (`fdt token revoke <id>`, el `token.id` de `fdt whoami`).
+- Si Core responde 429 (`cli.rate_limited`, p. ej. muchos equipos detrás de
+  la misma IP), `fdt login` espera lo que diga `Retry-After` (o
+  `error.meta.retry_after`) y sigue: mientras espera la aprobación hasta que
+  el código caduca, y al pedir el código hasta 4 intentos. Lo avisa por stderr.
 
 Niveles de un token `scoped`: `read` (solo lectura, sin secretos), `deploy`
 (lectura, `deploy`, `redeploy`, variables, `service update` y las credenciales
@@ -80,8 +135,9 @@ restart|pause|resume|install-workflow`, crear y borrar, y las lecturas con
 secretos de la organización, como invitaciones, tokens del registry o secretos
 de CI). `db credentials` sin `--reveal` no pide la contraseña, así que funciona
 con `read`. Un token limitado a
-proyectos ve los listados filtrados (fdt lo avisa) y no puede crear
-proyectos, servicios ni bases ni listar miembros. Los 403 de un token traen
+proyectos ve los listados filtrados (fdt lo avisa, y un `show` que no
+encuentra algo dice que puede existir fuera del alcance del token) y no puede
+crear proyectos ni bases ni listar miembros. Los 403 de un token traen
 `error.scope` `cli.token_level`, `cli.token_scope` o `cli.token_forbidden` y
 un `hint` con el nivel o alcance que falta. `--org <id>` de una organización
 que el token no cubre llega a Core y sale con 4 (`cli.token_scope`), no con 5.
@@ -91,7 +147,11 @@ que el token no cubre llega a Core y sale con 4 (`cli.token_scope`), no con 5.
 Cada comando trabaja sobre una organización, y algunos sobre un proyecto o un
 servicio. Se eligen en este orden:
 
-1. Flags: `--org` (o `FDT_ORG`), `--project`, el servicio como argumento o `--service`.
+1. Flags: `--org` (o `FDT_ORG`), `--project`, el servicio como argumento o
+   `-s/--service`. `-s` funciona en todos los comandos de servicio; el
+   argumento, donde no se confunde con otro: no en `env set|unset|import`
+   (sus argumentos son variables o el archivo). En `deploys -s <svc> <id>`
+   el argumento es el deployment.
 2. `.fdt.toml` del repo (`fdt link`), buscado desde la carpeta actual hacia arriba.
 3. La organización activa (`fdt use`).
 4. Si perteneces a una sola organización, esa.
@@ -113,21 +173,21 @@ contexto sin llamar a la API; `fdt doctor` comprueba todo.
 | `fdt project list\|show\|create\|rename\|delete` | Proyectos (`rename` cambia nombre y/o `--description`) |
 | `fdt service list\|show\|create\|update\|delete` | Servicios de deploy |
 | `fdt service setup` | Solo lectura: workflow, Dockerfiles sugeridos, token vivo; `--write-workflow` lo escribe en el repo |
-| `fdt service install-workflow` | Instala workflow y secreto en GitHub (`--mode pull_request\|commit`; commit dispara un build: haz `git pull`) |
+| `fdt service install-workflow` | Instala workflow y secreto en GitHub (`--mode pull_request\|commit`, por defecto el modo del servicio; avisa si es otro; commit dispara un build: haz `git pull`) |
 | `fdt service rotate-registry-token` | Token `fdr_` nuevo; revoca el anterior. Exige `--confirm` y `--output` o `--reveal` |
 | `fdt service restart\|pause\|resume` | Reiniciar sin deployment; pausar (0 contenedores, `--confirm`); reanudar (`--wait`) |
 | `fdt service diagnose` | Por qué no despliega: checks del repo, workflow, imagen y deployment |
 | `fdt deploy <svc>` · `redeploy` | Lanza un deploy (`--rebuild` fuerza build); `--wait --timeout` sale con 7 si falla y 8 si se acaba el tiempo |
-| `fdt rollback <svc>` | Vuelve a una imagen anterior: `--tag`, `--digest` o `--to <deployment>`; `--wait` |
-| `fdt deploys <svc> [<id>] [--job N]` | Historial, detalle con el build, log de un job |
+| `fdt rollback <svc>` | Vuelve a una imagen anterior: `--tag`, `--digest sha256:<64 hex>` o `--to <deployment>`; `--wait` |
+| `fdt deploys <svc> [<id>] [--job N]` | Historial, detalle con el build, log de un job. `<id>`: cualquier prefijo que no sea ambiguo |
 | `fdt logs <svc>` | Últimas líneas (`--tail`, `--since`, `--until`: duración o fecha RFC 3339) |
-| `fdt env list\|set\|unset\|import\|pull` | Variables; los secretos salen enmascarados |
-| `fdt db list\|show\|create\|delete` | Bases Postgres y MongoDB |
+| `fdt env list\|set\|unset\|import\|pull` | Variables; los secretos salen enmascarados. `list` sin variables lo dice; `unset` avisa de las que no existen |
+| `fdt db list\|show\|create\|delete` | Bases Postgres y MongoDB (`--engine` se comprueba contra los motores que ofrece la organización) |
 | `fdt db url --reveal` · `credentials [--reveal]` | Contraseña y cadenas: solo con `--reveal` (`url` sin él sale con 2) |
 | `fdt db set-credentials` | Cambia usuario/contraseña de Postgres (`--password-stdin\|--password-from-env`, `--confirm`) |
 | `fdt db link\|unlink\|connect` | Base en un proyecto; abrir `psql`/`mongosh` |
-| `fdt api <MÉTODO> <ruta>` | Llamada cruda autenticada (como `gh api`); `{org}`, `{project}`, `{service}` se rellenan |
-| `fdt skills` · `completions` · `update` | Skills para agentes, autocompletado, actualizar |
+| `fdt api <MÉTODO> <ruta>` | Llamada cruda autenticada (como `gh api`); `{org}`, `{project}`, `{service}` se rellenan. Con un error HTTP stdout queda vacío y el cuerpo va en `error.details.body` |
+| `fdt skills [list\|add\|remove\|update]` · `completions` · `update` | Skills para agentes (`add all`, `remove all`; un nombre que no existe sale con 5), autocompletado, actualizar |
 
 ## Salida
 
@@ -144,8 +204,15 @@ contexto sin llamar a la API; `fdt doctor` comprueba todo.
     "hint": "fdt org usage (y sube de plan en el panel)", "details": {"meta": {"limit": 1, "used": 1}}}}
   ```
 
-  `scope` es el `error.scope` de la API; `hint`, el comando que lo arregla
-  cuando se sabe.
+  `scope` es el `error.scope` de la API cuando lo trae. Los errores que
+  decide `fdt` sin llamar a la API llevan uno estable `fdt.<kind>`
+  (`fdt.not_found`, `fdt.ambiguous`, `fdt.confirmation_required`,
+  `fdt.missing_input`, `fdt.usage`…); los que `fdt` comprueba en nombre de
+  Core llevan el de Core (`deploy.subdomain_invalid`,
+  `quota.deploy.service_memory`). Una respuesta sin `error.scope` (un 404 del
+  gateway, `404 page not found`) sale sin `scope` y el mensaje dice que la
+  ruta puede no estar expuesta. `hint` es el comando que lo arregla cuando se
+  sabe.
 
 ## Códigos de salida
 
@@ -167,13 +234,18 @@ Reglas que `fdt` cumple para que un agente lo use sin supervisión:
 
 - **Nunca pregunta** sin terminal o con `--no-input`: si falta un dato falla
   con código 2 y dice qué flag falta.
-- **Borrar cuesta**: `project|service|db delete` exigen `--confirm <nombre
-  exacto>` (en una terminal se puede teclear). Borrar una organización no
-  existe en el CLI.
+- **Borrar cuesta**: `project|service|db delete`, `service pause`,
+  `service rotate-registry-token`, `db set-credentials` y `token revoke` de
+  una sesión exigen `--confirm <nombre exacto>` (en una terminal se puede
+  teclear; si la entrada se cierra, cancela con 2 en vez de esperar). Borrar
+  una organización no existe en el CLI.
 - **`--dry-run`** en las mutaciones muestra la petición (método, ruta,
-  cuerpo sin secretos) sin enviarla.
+  cuerpo sin secretos) sin enviarla, y falla donde fallaría la de verdad:
+  pide el mismo `--confirm`, valida `--digest`, `--engine`, el subdominio y
+  la memoria del plan. `env set --from-db --dry-run` no lee la contraseña.
 - **Repetir no rompe**: `create --if-not-exists` devuelve el recurso que ya
-  existe.
+  existe (`project create` sale con 2 y lista los candidatos si hay varios
+  con ese nombre).
 - **Secretos fuera del chat**: `fdt env list` enmascara; `fdt env set KEY
   --from-db <base>` cablea una base sin imprimir la URL; `--stdin`,
   `--from-env VAR` y `--from-file RUTA` (en `service create`:
@@ -215,6 +287,7 @@ fdt skills add all --from ./skills            # desde una carpeta en vez del bin
 | `FDT_HOME` | Carpeta de configuración (por defecto `~/.fdt`) |
 | `FDT_NO_KEYRING` | `1` guarda el token en archivo `0600` en vez del llavero |
 | `FDT_RELEASE_REPO` | Repo de releases para `fdt update` (por defecto `fundathyon/fdt-cli`) |
+| `FDT_RELEASES_URL` | URL base de las releases para `fdt update` y los instaladores (un espejo; por defecto `https://github.com/fundathyon/fdt-cli/releases`) |
 | `NO_COLOR` | Sin colores |
 
 ## Lo que todavía no hay
@@ -235,3 +308,13 @@ cargo test            # unitarias + tests/cli.rs (el binario real contra un Core
 
 `FDT_POLL_UNIT_MS` acorta las esperas (login por dispositivo, `--wait`) en
 los tests.
+
+## Publicar una versión
+
+Sube `version` en `Cargo.toml`, haz merge y empuja un tag `vX.Y.Z` con la misma
+versión: el workflow `release` compila, publica y prueba la instalación.
+Detalles en [RELEASING.md](RELEASING.md).
+
+## Licencia
+
+[MIT](LICENSE).

@@ -33,10 +33,17 @@ fdt doctor --json      # si algo de lo anterior falla: API, sesión, org, .fdt.t
 
 - `--json` en todo; lee **stdout** como datos. Mensajes y errores van a stderr
   (los errores también en JSON: `error.kind`, `error.scope`, `error.hint`).
+  Con un error stdout queda vacío, también en `fdt api` (el cuerpo va en
+  `error.details.body`). `error.scope` es el de Core, o `fdt.<kind>` si lo
+  decidió fdt sin llamar (`fdt.not_found`, `fdt.ambiguous`,
+  `fdt.confirmation_required`…); una respuesta del gateway sin scope (404
+  `page not found`) no trae `scope`.
+- El servicio va como argumento o con `-s/--service` (vale en todos los
+  comandos de servicio); en `env set|unset|import` solo `-s`.
 - `--no-input`: nunca esperes un prompt; pasa todo por flags.
 - Nombre, slug o id valen. Si el nombre es ambiguo (exit 2, `error.details.candidates`) usa el id.
-- Antes de mutar algo que no tengas claro: `--dry-run` (muestra método, ruta y cuerpo sin secretos, no envía).
-- Al reintentar un `create`: `--if-not-exists` (devuelve el existente, no duplica).
+- Antes de mutar algo que no tengas claro: `--dry-run` (muestra método, ruta y cuerpo sin secretos, no envía). Falla donde fallaría la ejecución real: también pide `--confirm`.
+- Al reintentar un `create`: `--if-not-exists` (devuelve el existente, no duplica; si hay varios con ese nombre, exit 2 con los candidatos).
 - Esperar es explícito: `deploy --wait --timeout 15m`, `redeploy|rollback|service resume --wait`, `db create --wait`.
 - Nada imprime una contraseña o un token sin `--reveal` (`db url`, `db credentials`, `token create`, `service rotate-registry-token`).
 
@@ -49,7 +56,7 @@ fdt doctor --json      # si algo de lo anterior falla: API, sesión, org, .fdt.t
 | 2 | uso incorrecto: falta un flag, nombre ambiguo, falta `--confirm` | corrige los flags; `error.hint` dice cuál |
 | 3 | sin sesión | pide a la persona `fdt login` / `FDT_TOKEN` |
 | 4 | sin permiso (`forbidden`; `error.scope` `cli.token_level`, `cli.token_scope` o `cli.token_forbidden`) | `error.hint` dice qué nivel o alcance falta; mira `fdt whoami --json` y "Niveles de token" |
-| 5 | no existe | `fdt <recurso> list --json`; revisa `--org` y `--project` |
+| 5 | no existe | `fdt <recurso> list --json`; revisa `--org` y `--project`. Con un token limitado a proyectos puede existir fuera de su alcance (el mensaje lo dice) |
 | 6 | cuota del plan (`error.scope` = `quota.*`) | `fdt org usage --json`; informa y para: no borres cosas ni busques atajos |
 | 7 | el deploy falló (`--wait`) | skill `fdt-troubleshoot` |
 | 8 | se acabó `--timeout` de `--wait` (`kind`: `timeout`) | sigue en curso: consulta `fdt deploys <svc> --json`; no repitas la mutación |
@@ -62,7 +69,7 @@ fdt doctor --json      # si algo de lo anterior falla: API, sesión, org, .fdt.t
 - `deploy`: además `deploy`, `redeploy`, `env set|unset|import`, `service update` y las credenciales de bases (`db credentials --reveal`, `db url --reveal`, `env set --from-db`). No crea ni borra recursos, ni hace `rollback`, `service restart|pause|resume` o `service install-workflow` (esos piden `admin`).
 - `admin`: todo lo que puede su dueño en esa org, también las lecturas con secretos de la org (invitaciones, tokens del registry, secretos de CI, credenciales de apps de Accounts o Cronify).
 - Si `error.message` dice "needs a token of level X", `error.hint` ya trae el `--level X` que hace falta.
-- `token.kind` = `session` (login de una persona) vale en todas sus orgs; `scoped` solo en la suya y quizá solo en ciertos proyectos (`project_ids`). Un token limitado a proyectos ve los listados filtrados (stderr lo avisa) y no puede crear proyectos, servicios ni bases, ni ver miembros (exit 4, `cli.token_scope`).
+- `token.kind` = `session` (login de una persona) vale en todas sus orgs; `scoped` solo en la suya y quizá solo en ciertos proyectos (`project_ids`). Un token limitado a proyectos ve los listados filtrados (stderr lo avisa) y no puede crear proyectos ni bases, ni ver miembros (exit 4, `cli.token_scope`); sí el servicio de una app de su proyecto. Un `show` que no encuentra algo avisa de que puede existir fuera de su alcance.
 
 Ante un 403 / exit 4: no intentes otra ruta ni `fdt api` para saltarlo. Di qué
 nivel hace falta y que la persona cree un token con `fdt token create <nombre>
@@ -71,14 +78,18 @@ ejecuta ella: el token se muestra una sola vez y exige `--output` o `--reveal`).
 
 Tokens y sesiones: un token creado con una sesión de `fdt login` lleva
 `created_by_token_id` (`fdt token list --json`). Revocar esa sesión
-(`fdt token revoke <id>` o desde el panel) revoca también esos tokens
-(`cascade_revoked` en la salida); `fdt logout` revoca solo la sesión. Un token
+(`fdt token revoke <id> --confirm <nombre>` o desde el panel) revoca también
+esos tokens (`cascade_revoked` en la salida); revocar una sesión, y sobre todo
+la que estás usando, exige `--confirm` (pide permiso antes). `fdt logout`
+revoca solo la sesión. Un token
 `scoped` no lista tokens, pero puede revocarse a sí mismo por id
 (`fdt token revoke <token.id de fdt whoami>`).
 
 ## Seguridad: reglas que no se negocian
 
-1. **Borrar**: `project|service|db delete` exigen `--confirm <nombre exacto>`.
+1. **Borrar**: `project|service|db delete` (y `service pause`,
+   `service rotate-registry-token`, `db set-credentials`, `token revoke` de una
+   sesión) exigen `--confirm <nombre exacto>`, también con `--dry-run`.
    Antes de ejecutarlo, **pide permiso explícito a la persona** nombrando el
    recurso exacto y que es irreversible. Un "sí" a otra cosa, o a "limpia todo",
    no cuenta. Haz `--dry-run` primero. No existe borrar una organización.
@@ -107,9 +118,9 @@ Tokens y sesiones: un token creado con una sesión de `fdt login` lleva
 ## Recetas cortas
 
 ```sh
-fdt logs api --since 10m --json            # data.lines[] {at, stream, text}; también --until o fechas RFC 3339
-fdt env list --service api --json          # secretos enmascarados
-fdt env set LOG_LEVEL=debug --service api --dry-run --json
-fdt deploys api --json                     # historial; status, error_code
+fdt logs tienda-web --since 10m --json            # data.lines[] {at, stream, text}; también --until o fechas RFC 3339
+fdt env list -s tienda-web --json          # secretos enmascarados
+fdt env set LOG_LEVEL=debug -s tienda-web --dry-run --json
+fdt deploys tienda-web --json                     # historial; status, error_code
 fdt org usage --json                       # consumo frente al plan
 ```

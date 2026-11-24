@@ -85,12 +85,16 @@ pub struct CreateArgs {
 pub async fn create(ctx: &Ctx, a: CreateArgs) -> Result<()> {
     let (api, org) = super::org_api(ctx).await?;
     let name = a.name.trim().to_lowercase();
+    let view = resolve::databases_view(&api, &org.id).await?;
     let mut data = None;
     if a.if_not_exists
-        && let Some(existing) = resolve::databases(&api, &org.id).await?.into_iter().find(|d| d["name"].as_str() == Some(name.as_str()))
+        && let Some(existing) = view["databases"].as_array().into_iter().flatten().find(|d| d["name"].as_str() == Some(name.as_str()))
     {
         ui::info(&format!("La base «{name}» ya existía."));
-        data = Some(existing);
+        data = Some(existing.clone());
+    }
+    if data.is_none() {
+        check_engine(&a.engine, &view)?;
     }
     let mut data = match data {
         Some(d) => d,
@@ -140,15 +144,34 @@ pub async fn create(ctx: &Ctx, a: CreateArgs) -> Result<()> {
     ctx.out.print(&data, || detail(&data))
 }
 
+/// The engines the org can create (`engines` of `GET …/deploy/databases`,
+/// Core's DEPLOY_DB_ENGINES). Without that list, Core decides.
+fn check_engine(engine: &str, view: &Value) -> Result<()> {
+    let Some(engines) = view["engines"].as_array() else { return Ok(()) };
+    let engines: Vec<&str> = engines.iter().filter_map(Value::as_str).collect();
+    if engines.contains(&engine) {
+        return Ok(());
+    }
+    let offered = if engines.is_empty() { "ninguno".to_owned() } else { engines.join(", ") };
+    Err(Failure::new(Kind::Usage, format!("La organización no ofrece el motor {engine}: ofrece {offered}."))
+        .hint(match engines.first() {
+            Some(e) => format!("--engine {e}"),
+            None => "la creación de bases no está activa: avisa a quien opera la plataforma".to_owned(),
+        })
+        .details(json!({"engines": engines}))
+        .into())
+}
+
 pub async fn delete(ctx: &Ctx, query: String, confirm: Option<String>, dry: bool) -> Result<()> {
     let (api, org) = super::org_api(ctx).await?;
     let db = resolve::database(&api, &org.id, &query).await?;
     let name = s(&db, "name");
     let path = format!("{}/{}", databases_path(&org.id), enc(&resolve::id(&db)));
+    // Also in a dry run: it would pass where the real one is refused otherwise.
+    ctx.confirm(&name, confirm.as_deref(), "borrar la base de datos")?;
     if dry {
         return dry_run(ctx, "db delete", "DELETE", &path, None);
     }
-    ctx.confirm(&name, confirm.as_deref(), "borrar la base de datos")?;
     let data = api.delete(&path).await?;
     ui::success(&format!("Base «{name}» en borrado (deleting)."));
     ctx.out.print(&data, String::new)
@@ -276,10 +299,10 @@ pub async fn set_credentials(
         body["password"] = json!(secrets::MASK);
     }
     ui::warn("Las apps que usan la base dejan de conectar hasta que actualices su DATABASE_URL (fdt env set DATABASE_URL --from-db <base> --service <servicio>).");
+    ctx.confirm(&name, confirm.as_deref(), "cambiar las credenciales de la base")?;
     if dry {
         return dry_run(ctx, "db set-credentials", "PATCH", &path, Some(body));
     }
-    ctx.confirm(&name, confirm.as_deref(), "cambiar las credenciales de la base")?;
     if let Some(p) = password {
         body["password"] = json!(p);
     }
@@ -344,4 +367,15 @@ pub async fn connect(ctx: &Ctx, query: String) -> Result<()> {
         return Err(fail(Kind::Error, format!("El cliente terminó con {status}.")));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn engines_are_checked_against_what_the_org_offers() {
+        let view = serde_json::json!({"engines": ["postgres"]});
+        assert!(super::check_engine("postgres", &view).is_ok());
+        assert!(super::check_engine("mongo", &view).is_err());
+        assert!(super::check_engine("mongo", &serde_json::json!({})).is_ok(), "no list: Core decides");
+    }
 }

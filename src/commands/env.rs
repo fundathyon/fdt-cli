@@ -59,6 +59,10 @@ fn masked(vars: &Value) -> Value {
 pub async fn list(ctx: &Ctx, service: Option<String>) -> Result<()> {
     let t = target(ctx, service.as_deref()).await?;
     let vars = masked(&t.api.get(&t.path).await?);
+    if vars.as_array().is_none_or(Vec::is_empty) {
+        ui::info(&format!("{} no tiene variables de entorno (fdt env set KEY=VALUE -s {}).", s(&t.service, "slug"), s(&t.service, "slug")));
+        return ctx.out.print(&json!([]), String::new);
+    }
     ctx.out.print(&vars, || table(&vars))
 }
 
@@ -89,6 +93,10 @@ async fn apply(
     argv_keys: &[String],
 ) -> Result<()> {
     let current = envfile::from_api(&t.api.get(&t.path).await?);
+    let missing: Vec<&str> = unset.iter().filter(|k| !current.iter().any(|v| &v.key == *k)).map(String::as_str).collect();
+    if !missing.is_empty() {
+        ui::warn(&format!("{} no existe en {}: no hay nada que quitar.", missing.join(", "), s(&t.service, "slug")));
+    }
     let (vars, diff) = envfile::merge(&current, set, unset, replace);
     let leaked: Vec<&String> = argv_keys
         .iter()
@@ -184,7 +192,20 @@ pub async fn set(ctx: &Ctx, a: SetArgs) -> Result<()> {
         }
         check_key(key)?;
         let value = if let Some(db) = &a.from_db {
-            super::db::connection_string(&t.api, &t.org, db, a.public).await?
+            if a.dry_run {
+                // A dry run does not read the password: the base has to exist,
+                // and the value stays a placeholder (a read token can dry-run it,
+                // and no secret read lands in the audit log).
+                let base = resolve::database(&t.api, &t.org.id, db).await?;
+                ui::info(&format!(
+                    "--dry-run: no se leen las credenciales de «{}»; aplicarlo guarda su cadena {} como secreto.",
+                    s(&base, "name"),
+                    if a.public { "pública" } else { "interna" }
+                ));
+                MASK.to_owned()
+            } else {
+                super::db::connection_string(&t.api, &t.org, db, a.public).await?
+            }
         } else if let Some(var) = &a.from_env {
             std::env::var(var).map_err(|_| {
                 ctx.need(&format!("la variable de entorno {var}"), "--from-env lee el valor de tu entorno y no está definida")

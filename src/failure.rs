@@ -9,6 +9,11 @@
 //!
 //! Exit codes: 0 ok, 1 error, 2 usage, 3 no session, 4 forbidden, 5 not found,
 //! 6 plan quota, 7 deploy failed, 8 `--wait` timed out.
+//!
+//! `scope` is Core's `error.scope` when the API sent one. A failure fdt
+//! decides on its own (no HTTP status) gets a stable `fdt.<kind>` instead
+//! (`fdt.not_found`, `fdt.ambiguous`, `fdt.usage`…). An API answer without
+//! `error.scope` (a gateway 404, say) has no scope.
 
 use serde::Serialize;
 use serde_json::{Value, json};
@@ -136,10 +141,16 @@ pub fn report(error: &anyhow::Error) -> (Value, i32) {
             .join(": "),
     );
     let mut body = json!({"kind": kind, "exit_code": kind.exit_code(), "message": message});
+    let local_scope = || format!("fdt.{}", json!(kind).as_str().unwrap_or("error"));
+    match failure {
+        Some(f) => match (&f.scope, f.status) {
+            (Some(scope), _) => body["scope"] = json!(scope),
+            (None, None) => body["scope"] = json!(local_scope()),
+            (None, Some(_)) => {}
+        },
+        None => body["scope"] = json!(local_scope()),
+    }
     if let Some(f) = failure {
-        if let Some(scope) = &f.scope {
-            body["scope"] = json!(scope);
-        }
         if let Some(status) = f.status {
             body["status"] = json!(status);
         }
@@ -177,6 +188,20 @@ mod tests {
                 .unwrap()
                 .starts_with("creando el servicio: ")
         );
+    }
+
+    #[test]
+    fn local_failures_get_a_stable_scope_and_api_ones_keep_theirs() {
+        let (json, _) = report(&anyhow::Error::from(Failure::new(Kind::NotFound, "No hay servicio «x».")));
+        assert_eq!(json["error"]["scope"], "fdt.not_found");
+        let (json, _) = report(&anyhow::Error::from(Failure::new(Kind::ConfirmationRequired, "c")));
+        assert_eq!(json["error"]["scope"], "fdt.confirmation_required");
+        let (json, _) = report(&anyhow::anyhow!("plano"));
+        assert_eq!(json["error"]["scope"], "fdt.error");
+        let mut from_api = Failure::new(Kind::NotFound, "404 page not found");
+        from_api.status = Some(404);
+        let (json, _) = report(&anyhow::Error::from(from_api));
+        assert!(json["error"].get("scope").is_none(), "an API answer without scope has none");
     }
 
     #[test]

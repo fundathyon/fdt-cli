@@ -21,6 +21,17 @@ pub struct Api {
 pub struct Answer {
     pub status: u16,
     pub body: Value,
+    /// Seconds of the `Retry-After` header (a 429), when it is a number.
+    pub retry_after: Option<u64>,
+}
+
+impl Answer {
+    /// A rate limit (429 or `cli.rate_limited`): how long to wait, from
+    /// `Retry-After` or `error.meta.retry_after`; `None` if it is not one.
+    pub fn rate_limited(&self) -> Option<Option<u64>> {
+        let limited = self.status == 429 || self.body["error"]["scope"] == "cli.rate_limited";
+        limited.then(|| self.retry_after.or_else(|| self.body["error"]["meta"]["retry_after"].as_u64()))
+    }
 }
 
 /// Percent-encodes one path segment.
@@ -104,6 +115,11 @@ impl Api {
             )
         })?;
         let status = response.status().as_u16();
+        let retry_after = response
+            .headers()
+            .get(reqwest::header::RETRY_AFTER)
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| v.trim().parse::<u64>().ok());
         let text = response
             .text()
             .await
@@ -113,7 +129,7 @@ impl Api {
         } else {
             serde_json::from_str(&text).unwrap_or(Value::String(text))
         };
-        Ok(Answer { status, body })
+        Ok(Answer { status, body, retry_after })
     }
 
     /// The whole envelope of a successful answer, or the mapped error.
@@ -165,12 +181,18 @@ impl Api {
 pub fn hint_for_scope(scope: &str) -> Option<&'static str> {
     Some(match scope {
         s if s.starts_with("quota.") => "fdt org usage (y sube de plan en el panel)",
-        "deploy.workflow_missing" => "fdt service setup <servicio> --install-workflow commit",
+        "deploy.workflow_missing" => {
+            "fdt service install-workflow <servicio> --mode pull_request (y fusiona el pull request), o --mode commit"
+        }
         "deploy.permission_missing" => {
             "acepta los permisos nuevos de la GitHub App de Foundathyon en GitHub y vuelve a intentarlo"
         }
         "deploy.no_image" => "fdt deploy <servicio> (lanza el build del workflow)",
-        "deploy.slug_taken" => "elige otro slug o usa --if-not-exists si es tuyo",
+        "deploy.slug_taken" => "elige otro subdominio, o usa --if-not-exists si el servicio ya es de esta app",
+        "deploy.slug_reserved" | "deploy.subdomain_invalid" => {
+            "elige otro subdominio: [a-z0-9-], sin guion en los extremos; www, api, admin, app, db… son de Foundathyon"
+        }
+        "deploy.image_name_taken" => "otro servicio de la organización ya usa la imagen de ese repo: fdt service list",
         "deploy.database_name_taken" => "elige otro nombre o usa --if-not-exists",
         "deploy.database_not_ready" => "fdt db show <base> (espera a que esté ready)",
         "deploy.app_not_found" => "fdt api GET /organizations/{org}/apps (revisa la app o el repo)",
@@ -217,15 +239,27 @@ fn sensitive_read_hint(scope: Option<&str>, message: &str) -> Option<String> {
     })
 }
 
+/// Whether an answer is Core's envelope (`{success, error: {…}}`) and not
+/// something the gateway or a proxy wrote (`404 page not found`).
+pub fn from_core(body: &Value) -> bool {
+    body.get("success").is_some() || body["error"].is_object()
+}
+
 /// A Failure from an API error answer.
 pub fn api_error(status: u16, body: &Value) -> Failure {
     let error = &body["error"];
     let scope = error["scope"].as_str().map(str::to_owned);
-    let message = error["message"]
+    let mut message = error["message"]
         .as_str()
         .map(str::to_owned)
-        .or_else(|| body.as_str().map(|s| s.chars().take(300).collect()))
+        .or_else(|| body.as_str().map(|s| s.trim().chars().take(300).collect()))
         .unwrap_or_else(|| format!("La API respondió {status}"));
+    let gateway_404 = status == 404 && !from_core(body);
+    if gateway_404 {
+        message = format!(
+            "La API respondió 404 sin la respuesta de Core («{message}»): la ruta no existe o el gateway no la expone"
+        );
+    }
     let quota = scope.as_deref().is_some_and(|s| s.starts_with("quota."));
     let kind = match status {
         401 => Kind::Unauthenticated,
@@ -241,6 +275,9 @@ pub fn api_error(status: u16, body: &Value) -> Failure {
             Kind::Unauthenticated => Some("fdt login (o exporta FDT_TOKEN con un token fdt_…)".to_owned()),
             Kind::Forbidden => Some(
                 "fdt whoami (revisa el nivel y el alcance del token, o tu rol en la organización)".to_owned(),
+            ),
+            Kind::NotFound if gateway_404 => Some(
+                "revisa la ruta: es relativa a la URL de la API (…/api/v1), sin repetir /api/v1 (fdt context la muestra)".to_owned(),
             ),
             _ => None,
         });
@@ -307,6 +344,16 @@ mod tests {
         let generic = err(403, "cli.token_level").hint.unwrap();
         assert!(generic.contains("--level admin") && generic.contains("credenciales de bases"), "{generic}");
         assert!(err(422, "cli.invalid_project").hint.unwrap().contains("fdt project list"));
+    }
+
+    #[test]
+    fn a_404_that_is_not_from_core_says_the_gateway_may_not_expose_the_route() {
+        let f = api_error(404, &json!("404 page not found"));
+        assert_eq!(f.kind, Kind::NotFound);
+        assert!(f.scope.is_none());
+        assert!(f.message.contains("gateway") && f.message.contains("404 page not found"), "{}", f.message);
+        let core = api_error(404, &json!({"success": false, "error": {"message": "Service not found", "scope": "deploy.service_not_found"}}));
+        assert_eq!(core.message, "Service not found");
     }
 
     #[test]

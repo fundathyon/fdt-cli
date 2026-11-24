@@ -4,6 +4,8 @@ version = "0.1.0"
 edition = "2024"
 rust-version = "1.85"
 description = "fdt: la infraestructura de tu organización en Foundathyon desde la terminal"
+license = "MIT"
+repository = "https://github.com/fundathyon/fdt-cli"
 publish = false
 
 [[bin]]

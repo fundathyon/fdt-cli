@@ -235,3 +235,7 @@ cargo test            # unitarias + tests/cli.rs (el binario real contra un Core
 
 `FDT_POLL_UNIT_MS` acorta las esperas (login por dispositivo, `--wait`) en
 los tests.
+
+## Licencia
+
+[MIT](LICENSE).

@@ -2,7 +2,7 @@
 name: fdt-deploy
 description: Lleva un repo de GitHub a producción en Foundathyon de punta a punta con `fdt`: Dockerfile, proyecto, servicio, workflow de GitHub Actions, variables y secretos, `fdt deploy --wait` y verificación. Actívala cuando la persona diga "despliega esta app", "súbela a Foundathyon", "crea el servicio", "pon esto en producción" o quiera el primer deploy de un repo. Para redeploys de un servicio ya vivo basta fdt-basics.
 metadata:
-  version: "0.3.0"
+  version: "0.4.0"
   owner: fundathyon
 ---
 
@@ -25,16 +25,18 @@ fdt org usage --json                        # ¿hay cupo de servicios y memoria?
 ```
 
 Mira el repo: ¿hay `Dockerfile`? ¿qué puerto escucha la app? ¿ruta de salud?
-Sin Dockerfile, créalo en el paso 3 con la plantilla recomendada.
+Sin Dockerfile, créalo y súbelo (commit y push a la rama) ANTES del paso 2: el
+workflow que instala `service create` dispara el primer build con ese push.
 
 ## 2. Proyecto y servicio
 
 ```sh
 fdt project create tienda --if-not-exists --json
 fdt service create tienda-web --project tienda --repo acme/tienda-web \
-  --health-path /health --workflow-mode manual --if-not-exists --dry-run --json   # revisa url y service_memory_mb_options
+  --health-path /health --if-not-exists --dry-run --json   # revisa url y service_memory_mb_options
 fdt service create tienda-web --project tienda --repo acme/tienda-web \
-  --health-path /health --workflow-mode manual --if-not-exists --json
+  --health-path /health --if-not-exists --json
+git pull                                     # el commit del workflow dejó tu copia local atrás
 fdt link --project tienda -s tienda-web      # .fdt.toml; lo demás ya no necesita flags
 ```
 
@@ -47,20 +49,22 @@ fdt link --project tienda -s tienda-web      # .fdt.toml; lo demás ya no necesi
 - Al servicio se le llama luego por su **nombre** (el de la app: el nombre del
   repo, `tienda-web`; cámbialo con `--name`) o por su **slug** (`tienda-web-acme`).
 - Subdominio: `a-z0-9-`, sin guion en los extremos (exit 2 `deploy.subdomain_invalid`
-  antes de llamar a la API). No uses `api` como nombre de ejemplo: es un subdominio reservado.
+  antes de llamar a la API). Nombres como `api` o `admin` son de Foundathyon, pero el argumento es solo un prefijo y el resultado lleva el sufijo de la organización (`api-acme`), así que no chocan.
 - Por defecto: `--port 3000`, `--memory 256` (alias `--size`; 256 es el máximo
   de Free y Starter), la rama por defecto del repo. Si `--memory` no cabe en el
   plan sale con 6 `quota.deploy.service_memory` sin enviar nada. El puerto
   debe ser el que escucha el contenedor.
-- `--workflow-mode`: `pull_request` (por defecto: Core abre un PR con el
-  workflow y guarda el secreto del registry), `commit` (commit directo en la
-  rama: dispara el build ya) o `manual` (no toca GitHub; instalas el workflow
-  en el paso 3, después del Dockerfile). Con el Dockerfile aún sin subir, usa
-  `manual`, como arriba. `data.workflow.status` dice qué pasó.
+- `--workflow-mode`: `commit` (por defecto, como el panel: Core hace commit del
+  workflow en la rama y guarda el secreto del registry; **ese push dispara el
+  primer build**), `pull_request` (abre un PR; el build llega al fusionarlo) o
+  `manual` (no toca GitHub; luego `fdt service install-workflow`). Por eso el
+  **Dockerfile debe estar subido antes de crear el servicio**; si aún no lo
+  está, usa `--workflow-mode manual` y sigue el paso 3. Tras `commit`, haz
+  `git pull`. `data.workflow.status` dice qué pasó.
 - `--no-auto-deploy`: el workflow no corre en cada push a la rama; solo con `fdt deploy`.
 - Monorepo: `--dockerfile <ruta>` y `--build-context <carpeta>`.
 - Una app tiene un solo servicio: si ya existe, `create` sale con 1
-  (`fdt.service_exists`); con `--if-not-exists` lo devuelve (`created: false`).
+  (`fdt.service_exists`: conflicto con lo existente, no uso incorrecto); con `--if-not-exists` lo devuelve (`created: false`).
 - Estado inicial: `awaiting_first_deploy`.
 - exit 6 `quota.deploy.services|service_memory|memory`: para e informa (ver `fdt-basics`).
 
@@ -75,19 +79,22 @@ Lee `data.setup.recommended_dockerfile` (`template_id`, `warnings`) y el
 puesto. Si el repo no tiene Dockerfile, escribe ese contenido. Next.js exige
 `output: "standalone"` en su config.
 
-**Orden importante**: el workflow se dispara con cada push a la rama. Haz
-commit y push del Dockerfile **antes** de instalar el workflow, o el primer
-build fallará. Pide permiso a la persona para el commit/push si no lo pidió.
+**Orden importante**: el workflow se dispara con cada push a la rama. Si el
+servicio ya se creó con el modo por defecto (`commit`), el workflow ya está en
+la rama y el Dockerfile debía estar antes; si el primer build falló por eso,
+sube el Dockerfile y lanza `fdt deploy tienda-web --rebuild --wait`. Con
+`manual`, haz commit y push del Dockerfile **antes** de instalar el workflow.
+Pide permiso a la persona para el commit/push si no lo pidió.
 
 `fdt service setup` solo lee. Instalar es otro comando:
 
 ```sh
-fdt service install-workflow tienda-web --mode pull_request --dry-run --json   # revisa
-fdt service install-workflow tienda-web --mode pull_request --json   # abre un PR
+fdt service install-workflow tienda-web --mode commit --dry-run --json   # revisa
 fdt service install-workflow tienda-web --mode commit --json         # commit directo a la rama
+fdt service install-workflow tienda-web --mode pull_request --json   # abre un PR
 ```
 
-Sin `--mode` usa el modo del servicio (o `pull_request` si es `manual`), y
+Sin `--mode` usa el modo del servicio (o `commit` si es `manual`), y
 avisa por stderr si pasas otro. Salida: `data.workflow.status` = `committed` o `pull_request_open` (con
 `data.workflow.pull_request_url`: la persona debe fusionarlo). Con `--mode
 commit` el push dispara un build y tu copia local queda atrás: **haz `git pull`**
@@ -97,8 +104,11 @@ commit` el push dispara un build y tu copia local queda atrás: **haz `git pull`
 local; luego commit y push) y pide la secret `FOUNDATHYON_REGISTRY_TOKEN` a la persona.
 
 No rotes el token del registry salvo que `diagnose` diga `registry_token`:
-`fdt service rotate-registry-token tienda-web --confirm tienda-web --output <archivo>` revoca
+`fdt service rotate-registry-token tienda-web --confirm tienda-web-acme --output <archivo>` revoca
 el anterior y rompe el workflow hasta actualizar el secreto (o reinstalar el workflow).
+`--confirm` (también en `service delete` y `service pause`) exige el **slug** completo, con el
+sufijo de la organización: léelo con `fdt service show tienda-web --json` (campo `slug`);
+si te equivocas, `error.hint` trae el valor exacto.
 
 ## 4. Variables y secretos
 

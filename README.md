@@ -59,11 +59,13 @@ Llevar un repo a producción:
 
 ```sh
 fdt service create tienda-web --project tienda --repo acme/tienda-web --if-not-exists --dry-run   # URL y memoria que deja el plan
+# (el Dockerfile ya debe estar en la rama: el commit del workflow lanza el primer build)
 fdt service create tienda-web --project tienda --repo acme/tienda-web --if-not-exists
-#   → servicio tienda-web-acme (https://tienda-web-acme.foundathyon.dev), PR con el workflow y el secreto del registry
+#   → servicio tienda-web-acme (https://tienda-web-acme.foundathyon.dev), workflow y secreto del registry instalados
+git pull                        # el commit del workflow dejó tu copia local atrás
 fdt db create tienda-pg --project tienda --wait --if-not-exists
 fdt env set DATABASE_URL --from-db tienda-pg -s tienda-web   # la URL nunca se imprime
-fdt deploy tienda-web --wait    # tras fusionar el PR del workflow
+fdt deploy tienda-web --wait    # el primer build ya lo lanzó el commit del workflow; esto espera o redespliega
 fdt logs tienda-web --since 10m
 fdt service diagnose tienda-web      # si algo no levanta
 ```
@@ -79,11 +81,12 @@ fdt service diagnose tienda-web      # si algo no levanta
   Foundathyon, pero con el sufijo (`api-acme`) ya no chocan.
 - **Por defecto**: `--port 3000`, `--memory 256` (alias `--size`; el máximo
   por servicio en Free y Starter), la rama por defecto del repo y
-  `--workflow-mode pull_request` (Core abre un PR con el workflow y guarda el
-  secreto `FOUNDATHYON_REGISTRY_TOKEN`; el primer build llega al
-  fusionarlo). `--workflow-mode commit` hace commit directo en la rama (como
-  el panel; ese push lanza el build), y `manual` no toca GitHub (luego
-  `fdt service install-workflow`). La memoria se comprueba contra los
+  `--workflow-mode commit` (como el panel: Core hace commit directo del
+  workflow en la rama y guarda el secreto `FOUNDATHYON_REGISTRY_TOKEN`). Ese
+  push **lanza el primer build**, así que sube el Dockerfile antes, y luego
+  haz `git pull` porque tu copia local queda atrás. `--workflow-mode
+  pull_request` abre un PR con el workflow (el primer build llega al
+  fusionarlo) y `manual` no toca GitHub (luego `fdt service install-workflow`). La memoria se comprueba contra los
   tamaños del plan (`service_memory_mb_options`) antes de enviar: si no
   cabe, sale con 6 y `quota.deploy.service_memory`.
 - **`--no-auto-deploy`**: el workflow no corre en cada push a la rama; solo
@@ -91,7 +94,7 @@ fdt service diagnose tienda-web      # si algo no levanta
 - Después, el servicio se nombra por su nombre (el de la app, es decir el del
   repo: `tienda-web`; otro con `--name`) o por su slug (`tienda-web-acme`).
 - **Una app, un servicio**: si la app ya tiene servicio, `create` falla
-  (`fdt.service_exists`); con `--if-not-exists` lo devuelve, aunque su
+  (`fdt.service_exists`, sale con 1: ver Códigos de salida); con `--if-not-exists` lo devuelve, aunque su
   subdominio lleve sufijo. La salida trae `created` y, al crear, `workflow`
   (`status`: `pull_request_open`, `committed`, `failed` o `not_installed`).
 - Un token limitado a proyectos puede crear el servicio de una app de su
@@ -173,7 +176,7 @@ contexto sin llamar a la API; `fdt doctor` comprueba todo.
 | `fdt project list\|show\|create\|rename\|delete` | Proyectos (`rename` cambia nombre y/o `--description`) |
 | `fdt service list\|show\|create\|update\|delete` | Servicios de deploy |
 | `fdt service setup` | Solo lectura: workflow, Dockerfiles sugeridos, token vivo; `--write-workflow` lo escribe en el repo |
-| `fdt service install-workflow` | Instala workflow y secreto en GitHub (`--mode pull_request\|commit`, por defecto el modo del servicio; avisa si es otro; commit dispara un build: haz `git pull`) |
+| `fdt service install-workflow` | Instala workflow y secreto en GitHub (`--mode pull_request\|commit`, por defecto el modo del servicio, o `commit` si es `manual`; avisa si es otro; commit dispara un build: haz `git pull`) |
 | `fdt service rotate-registry-token` | Token `fdr_` nuevo; revoca el anterior. Exige `--confirm` y `--output` o `--reveal` |
 | `fdt service restart\|pause\|resume` | Reiniciar sin deployment; pausar (0 contenedores, `--confirm`); reanudar (`--wait`) |
 | `fdt service diagnose` | Por qué no despliega: checks del repo, workflow, imagen y deployment |
@@ -219,7 +222,7 @@ contexto sin llamar a la API; `fdt doctor` comprueba todo.
 | Código | Significa | `error.kind` |
 |---|---|---|
 | 0 | Bien | |
-| 1 | Error (API, red) | `error`, `api`, `network`, `cancelled` |
+| 1 | Error (API, red) y conflictos con lo que ya existe (`fdt.service_exists`, `deploy.slug_taken`) | `error`, `api`, `network`, `cancelled` |
 | 2 | Uso incorrecto: flag que falta, nombre ambiguo, falta `--confirm` | `usage`, `missing_input`, `ambiguous`, `confirmation_required` |
 | 3 | Sin sesión o el login no se completó | `unauthenticated`, `login_failed` |
 | 4 | Sin permiso | `forbidden` |
@@ -237,7 +240,13 @@ Reglas que `fdt` cumple para que un agente lo use sin supervisión:
 - **Borrar cuesta**: `project|service|db delete`, `service pause`,
   `service rotate-registry-token`, `db set-credentials` y `token revoke` de
   una sesión exigen `--confirm <nombre exacto>` (en una terminal se puede
-  teclear; si la entrada se cierra, cancela con 2 en vez de esperar). Borrar
+  teclear; si la entrada se cierra, cancela con 2 en vez de esperar). Qué
+  valor: `project delete` el nombre del proyecto; `db delete` y
+  `db set-credentials` el nombre de la base; `token revoke` el nombre del
+  token (su id si no tiene); `service delete|pause|rotate-registry-token` el
+  **slug** del servicio, que lleva el sufijo de la organización
+  (`tienda-web-acme`, no `tienda-web`): `fdt service show tienda-web --json`
+  y lee `slug` (o `error.hint`, que trae el valor exacto). Borrar
   una organización no existe en el CLI.
 - **`--dry-run`** en las mutaciones muestra la petición (método, ruta,
   cuerpo sin secretos) sin enviarla, y falla donde fallaría la de verdad:

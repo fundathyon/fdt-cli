@@ -2,7 +2,7 @@
 name: fdt-basics
 description: Reglas base para operar la infraestructura de una organización en Foundathyon con el CLI `fdt` (proyectos, servicios, deploys, logs, variables, bases de datos). Actívala siempre que la persona pida desplegar, ver el estado o los logs de un servicio, cambiar variables de entorno, crear o conectar una base de datos, o cualquier cosa de Foundathyon, aunque no diga "fdt". Cubre comprobar sesión y contexto, --json, códigos de salida, niveles de token y qué nunca hacer sin permiso explícito.
 metadata:
-  version: "0.3.0"
+  version: "0.4.0"
   owner: fundathyon
 ---
 
@@ -52,7 +52,7 @@ fdt doctor --json      # si algo de lo anterior falla: API, sesión, org, .fdt.t
 | Código | Significa | Qué hacer |
 |---|---|---|
 | 0 | bien | seguir |
-| 1 | error de API o de red (`kind`: `api`, `network`) | lee `error.message`; reintenta una vez |
+| 1 | error de API o de red (`kind`: `api`, `network`), o un conflicto con lo que ya existe (`fdt.service_exists`, `deploy.slug_taken`) | lee `error.message`; reintenta una vez |
 | 2 | uso incorrecto: falta un flag, nombre ambiguo, falta `--confirm` | corrige los flags; `error.hint` dice cuál |
 | 3 | sin sesión | pide a la persona `fdt login` / `FDT_TOKEN` |
 | 4 | sin permiso (`forbidden`; `error.scope` `cli.token_level`, `cli.token_scope` o `cli.token_forbidden`) | `error.hint` dice qué nivel o alcance falta; mira `fdt whoami --json` y "Niveles de token" |
@@ -89,7 +89,11 @@ revoca solo la sesión. Un token
 
 1. **Borrar**: `project|service|db delete` (y `service pause`,
    `service rotate-registry-token`, `db set-credentials`, `token revoke` de una
-   sesión) exigen `--confirm <nombre exacto>`, también con `--dry-run`.
+   sesión) exigen `--confirm <nombre exacto>`, también con `--dry-run`. En los
+   comandos de `service` el valor es el **slug** con el sufijo de la
+   organización (`tienda-web-acme`, no `tienda-web`): sácalo de
+   `fdt service show tienda-web --json` (`slug`); en `db`, el nombre de la base;
+   en `project`, el del proyecto. Si fallas, `error.hint` trae el valor exacto.
    Antes de ejecutarlo, **pide permiso explícito a la persona** nombrando el
    recurso exacto y que es irreversible. Un "sí" a otra cosa, o a "limpia todo",
    no cuenta. Haz `--dry-run` primero. No existe borrar una organización.

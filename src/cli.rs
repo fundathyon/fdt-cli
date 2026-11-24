@@ -415,10 +415,11 @@ pub struct ServiceCreate {
     /// El workflow no corre en cada push a la rama: solo despliega con fdt deploy (auto_deploy=false).
     #[arg(long)]
     pub no_auto_deploy: bool,
-    /// Cómo instala Core el workflow y el secreto del registry en el repo: pull_request (por defecto: abre
-    /// un PR; el primer build llega al fusionarlo), commit (commit directo en la rama, como el panel) o manual
-    /// (no toca GitHub; luego fdt service install-workflow).
-    #[arg(long, value_parser = ["pull_request", "commit", "manual"], default_value = "pull_request")]
+    /// Cómo instala Core el workflow y el secreto del registry en el repo: commit (por defecto, como el
+    /// panel: commit directo en la rama; ese push lanza el primer build y tu copia local queda atrás: haz
+    /// git pull; sube el Dockerfile ANTES), pull_request (abre un PR; el primer build llega al fusionarlo) o
+    /// manual (no toca GitHub; luego fdt service install-workflow).
+    #[arg(long, value_parser = ["commit", "pull_request", "manual"], default_value = "commit")]
     pub workflow_mode: String,
     /// Variable inicial KEY=VALUE (se puede repetir).
     #[arg(long = "env", short = 'e', value_name = "KEY=VALUE")]
@@ -486,7 +487,7 @@ pub enum ServiceCommand {
     },
     /// Crea el servicio de deploy de una app, como el panel: subdominio con el sufijo de la organización,
     /// imagen con el nombre del repo, y el workflow con el secreto del registry instalados en el repo.
-    #[command(after_help = "Ejemplos:\n  fdt service create tienda-web --repo acme/tienda-web --project tienda --if-not-exists --json\n  fdt service create tienda-web --repo acme/tienda-web --port 8080 --memory 512 --workflow-mode commit\n  fdt service create --repo acme/tienda-web --dry-run     # Core elige el subdominio\n\nPor defecto: puerto 3000, memoria 256 MB (el máximo de Free y Starter), la rama por defecto del repo y\n--workflow-mode pull_request. Una app tiene un solo servicio: si ya lo tiene, falla (o lo devuelve con --if-not-exists).")]
+    #[command(after_help = "Ejemplos:\n  fdt service create tienda-web --repo acme/tienda-web --project tienda --if-not-exists --json\n  fdt service create tienda-web --repo acme/tienda-web --port 8080 --memory 512 --workflow-mode pull_request\n  fdt service create --repo acme/tienda-web --dry-run     # Core elige el subdominio\n\nPor defecto: puerto 3000, memoria 256 MB (el máximo de Free y Starter), la rama por defecto del repo y\n--workflow-mode commit (commit directo del workflow en la rama: dispara el primer build, así que sube el\nDockerfile antes, y luego haz git pull). Una app tiene un solo servicio: si ya lo tiene, falla (o lo devuelve con --if-not-exists).")]
     Create(ServiceCreate),
     /// Cambia ajustes (nombre, rama, puerto, memoria, healthcheck, build).
     Update(ServiceUpdate),
@@ -508,11 +509,11 @@ pub enum ServiceCommand {
         write_workflow: Option<PathBuf>,
     },
     /// Instala el workflow y su secreto en el repo de GitHub, por commit o pull request.
-    #[command(after_help = "Sin --mode usa el workflow_mode del servicio (commit o pull_request), o pull_request si es manual.\nCon --mode commit, Core hace commit en la rama: ese push dispara un build y deja tu copia local atrás (haz git pull).")]
+    #[command(after_help = "Sin --mode usa el workflow_mode del servicio (commit o pull_request), o commit si es manual.\nCon --mode commit, Core hace commit en la rama: ese push dispara un build y deja tu copia local atrás (haz git pull).")]
     InstallWorkflow {
         #[command(flatten)]
         service: Svc,
-        /// commit o pull_request (por defecto el modo del servicio, o pull_request).
+        /// commit o pull_request (por defecto el modo del servicio, o commit si es manual).
         #[arg(long, value_parser = ["commit", "pull_request"])]
         mode: Option<String>,
         #[arg(long)]

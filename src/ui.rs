@@ -5,6 +5,7 @@ use crate::failure::{Kind, fail};
 use anyhow::Result;
 use std::io::IsTerminal;
 
+
 /// Whether a person is at the terminal: both stdin and stdout are a TTY.
 pub fn tty() -> bool {
     std::io::stdin().is_terminal() && std::io::stdout().is_terminal()
@@ -74,20 +75,37 @@ fn cancelled() -> anyhow::Error {
     fail(Kind::Cancelled, "Cancelado.")
 }
 
-/// Asks for a non-empty line of text.
+/// Asks for a line of text on stdin. End of input (Ctrl-D, a closed pipe, a
+/// pseudo-terminal with nothing behind it) or a read error is `None`: the
+/// caller cancels instead of waiting forever, which is what a key-by-key
+/// prompt did on a terminal whose input was at EOF.
+pub fn ask_line(message: &str) -> Option<String> {
+    use std::io::Write;
+    eprint!("{} {message}: ", Colors::stderr().cyan("?"));
+    let _ = std::io::stderr().flush();
+    read_answer(&mut std::io::stdin().lock())
+}
+
+fn read_answer(input: &mut impl std::io::BufRead) -> Option<String> {
+    let mut line = String::new();
+    match input.read_line(&mut line) {
+        Ok(0) | Err(_) => {
+            eprintln!();
+            None
+        }
+        Ok(_) => Some(line.trim().to_owned()),
+    }
+}
+
+/// Asks for a non-empty line of text; EOF cancels.
 pub fn ask(message: &str) -> Result<String> {
-    let value: String = dialoguer::Input::new()
-        .with_prompt(message)
-        .validate_with(|v: &String| -> std::result::Result<(), &str> {
-            if v.trim().is_empty() {
-                Err("Requerido")
-            } else {
-                Ok(())
-            }
-        })
-        .interact_text()
-        .map_err(|_| cancelled())?;
-    Ok(value.trim().to_owned())
+    loop {
+        match ask_line(message) {
+            None => return Err(cancelled()),
+            Some(v) if v.is_empty() => continue,
+            Some(v) => return Ok(v),
+        }
+    }
 }
 
 /// A choice among options; returns the index.
@@ -166,5 +184,14 @@ pub fn status(text: &str) -> String {
         "failed" | "error" | "cancelled" | "degraded" => c.red(text),
         "" | "-" => c.gray("-"),
         _ => c.yellow(text),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn end_of_input_is_no_answer() {
+        assert_eq!(super::read_answer(&mut std::io::Cursor::new(b"")), None);
+        assert_eq!(super::read_answer(&mut std::io::Cursor::new(b"  tienda \n")).as_deref(), Some("tienda"));
     }
 }

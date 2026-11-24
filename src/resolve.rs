@@ -58,10 +58,14 @@ pub fn pick(items: &[Value], query: &str, keys: &[&str], what: &str, list: &str)
             }
         }
     }
-    if matches.is_empty() && q.len() >= 6 {
+    // An id prefix: any length for items without names (deployments, whose
+    // only handle is the id), 6 or more where a short text is more likely a
+    // name than an id.
+    let min_prefix = if keys.is_empty() { 1 } else { 6 };
+    if matches.is_empty() && q.len() >= min_prefix {
         matches = items
             .iter()
-            .filter(|i| i["id"].as_str().is_some_and(|id| id.starts_with(q)))
+            .filter(|i| i["id"].as_str().is_some_and(|id| id.to_ascii_lowercase().starts_with(&q.to_ascii_lowercase())))
             .collect();
     }
     match matches.len() {
@@ -84,11 +88,38 @@ pub fn id(item: &Value) -> String {
     item["id"].as_str().unwrap_or_default().to_owned()
 }
 
-/// A scoped token sees lists filtered to its projects (`meta.cli_filtered`).
+/// A token limited to projects sees lists filtered to them (`meta.cli_filtered`).
+fn is_filtered(envelope: &Value) -> bool {
+    envelope["meta"]["cli_filtered"] == true
+}
+
 fn note_filtered(envelope: &Value) {
-    if envelope["meta"]["cli_filtered"] == true {
+    if is_filtered(envelope) {
         crate::ui::info("La lista está filtrada a los proyectos del token (los totales de la API cuentan también lo que no ves).");
     }
+}
+
+/// A "not found" in a list filtered by the token may exist outside its
+/// projects: say so instead of a flat "No hay…".
+fn beyond_token(result: Result<Value>, filtered: bool) -> Result<Value> {
+    if !filtered {
+        return result;
+    }
+    result.map_err(|e| match crate::failure::failure_of(&e) {
+        Some(f) if f.kind == Kind::NotFound => {
+            let mut f = f.clone();
+            f.message = format!(
+                "{} Puede existir fuera del alcance del token: está limitado a unos proyectos y la lista viene filtrada.",
+                f.message
+            );
+            f.hint = Some(
+                "fdt whoami muestra los proyectos del token; para lo que está fuera usa un token de la organización (fdt token create <nombre> sin --project) o tu sesión (fdt login)"
+                    .to_owned(),
+            );
+            f.into()
+        }
+        _ => e,
+    })
 }
 
 /// An organization of the user by id or name. An id that is not in the list
@@ -115,8 +146,14 @@ pub async fn orgs(api: &Api) -> Result<Vec<Value>> {
 
 /// Every project of the org, through all pages.
 pub async fn projects(api: &Api, org: &str) -> Result<Vec<Value>> {
+    Ok(projects_scoped(api, org).await?.0)
+}
+
+/// The projects and whether the token filtered the list.
+pub async fn projects_scoped(api: &Api, org: &str) -> Result<(Vec<Value>, bool)> {
     const SIZE: usize = 100;
     let mut all = Vec::new();
+    let mut filtered = false;
     for page in 0..50 {
         let envelope = api
             .envelope(
@@ -128,6 +165,7 @@ pub async fn projects(api: &Api, org: &str) -> Result<Vec<Value>> {
             .await?;
         if page == 0 {
             note_filtered(&envelope);
+            filtered = is_filtered(&envelope);
         }
         let items = envelope["data"].as_array().cloned().unwrap_or_default();
         let n = items.len();
@@ -136,7 +174,7 @@ pub async fn projects(api: &Api, org: &str) -> Result<Vec<Value>> {
             break;
         }
     }
-    Ok(all)
+    Ok((all, filtered))
 }
 
 /// The deploy services of the org (`data`), plus `meta` (limits).
@@ -155,7 +193,15 @@ pub async fn services(api: &Api, org: &str) -> Result<Vec<Value>> {
 
 /// The databases of the org (`data.databases`) and the whole list view.
 pub async fn databases_view(api: &Api, org: &str) -> Result<Value> {
-    api.get(&format!("/organizations/{}/deploy/databases", enc(org))).await
+    Ok(databases_view_scoped(api, org).await?.0)
+}
+
+/// The list view and whether the token filtered it.
+pub async fn databases_view_scoped(api: &Api, org: &str) -> Result<(Value, bool)> {
+    let mut envelope = api
+        .envelope(reqwest::Method::GET, &format!("/organizations/{}/deploy/databases", enc(org)), &[], None)
+        .await?;
+    Ok((envelope["data"].take(), is_filtered(&envelope)))
 }
 
 pub async fn databases(api: &Api, org: &str) -> Result<Vec<Value>> {
@@ -181,15 +227,20 @@ pub async fn project_apps(api: &Api, org: &str, project: &str) -> Result<Vec<Val
 }
 
 pub async fn service(api: &Api, org: &str, query: &str) -> Result<Value> {
-    pick(&services(api, org).await?, query, &["slug", "name"], "servicio", "fdt service list")
+    let (items, meta) = services_with_meta(api, org).await?;
+    let filtered = meta["cli_filtered"] == true;
+    beyond_token(pick(&items, query, &["slug", "name"], "servicio", "fdt service list"), filtered)
 }
 
 pub async fn database(api: &Api, org: &str, query: &str) -> Result<Value> {
-    pick(&databases(api, org).await?, query, &["name"], "base de datos", "fdt db list")
+    let (view, filtered) = databases_view_scoped(api, org).await?;
+    let items = view["databases"].as_array().cloned().unwrap_or_default();
+    beyond_token(pick(&items, query, &["name"], "base de datos", "fdt db list"), filtered)
 }
 
 pub async fn project(api: &Api, org: &str, query: &str) -> Result<Value> {
-    pick(&projects(api, org).await?, query, &["name"], "proyecto", "fdt project list")
+    let (items, filtered) = projects_scoped(api, org).await?;
+    beyond_token(pick(&items, query, &["name"], "proyecto", "fdt project list"), filtered)
 }
 
 /// An app by id, slug, name or `owner/repo`.
@@ -225,6 +276,26 @@ mod tests {
         assert_eq!(id(&pick(&items(), "tienda", &["slug", "name"], "x", "l").unwrap()), "11111111-aaaa");
         assert_eq!(id(&pick(&items(), "api-2", &["slug", "name"], "x", "l").unwrap()), "33333333-cccc");
         assert_eq!(id(&pick(&items(), "222222", &["slug", "name"], "x", "l").unwrap()), "22222222-bbbb");
+    }
+
+    #[test]
+    fn deployments_take_any_unambiguous_id_prefix() {
+        let deps = vec![json!({"id": "3f2a9c1d-0000"}), json!({"id": "3f9b0000-0000"}), json!({"id": "a1000000-0000"})];
+        assert_eq!(id(&pick(&deps, "a1", &[], "deployment", "l").unwrap()), "a1000000-0000");
+        assert_eq!(id(&pick(&deps, "3F2A", &[], "deployment", "l").unwrap()), "3f2a9c1d-0000");
+        let err = pick(&deps, "3f", &[], "deployment", "l").unwrap_err();
+        assert_eq!(crate::failure::failure_of(&err).unwrap().kind, Kind::Ambiguous);
+        // Named resources still need 6 characters: "api" is a name, not an id prefix.
+        assert!(pick(&items(), "1111", &["name"], "x", "l").is_err());
+    }
+
+    #[test]
+    fn a_filtered_list_says_the_resource_may_be_out_of_scope() {
+        let err = beyond_token(pick(&items(), "nope", &["name"], "servicio", "l"), true).unwrap_err();
+        let f = crate::failure::failure_of(&err).unwrap();
+        assert_eq!(f.kind, Kind::NotFound);
+        assert!(f.message.contains("fuera del alcance del token"), "{}", f.message);
+        assert!(f.hint.as_deref().unwrap().contains("fdt whoami"));
     }
 
     #[test]

@@ -119,12 +119,34 @@ async fn login_with_token(ctx: &mut Ctx, token: String) -> Result<()> {
     })
 }
 
+/// How many times `fdt login` asks for a device code when Core answers 429.
+const DEVICE_CODE_ATTEMPTS: u32 = 4;
+
 async fn device_login(ctx: &mut Ctx, no_browser: bool) -> Result<()> {
     let anon = ctx.anonymous()?;
-    let code = anon
-        .post("/cli/device/code", &json!({"client_name": client_name(), "hostname": hostname()}))
-        .await
-        .context("no se pudo iniciar el login por dispositivo")?;
+    let unit = super::poll_unit();
+    // Many people behind one IP (a hackathon) can hit the rate limit: a 429
+    // waits what Core says and tries again, a few times, before failing.
+    let request = json!({"client_name": client_name(), "hostname": hostname()});
+    let mut attempt = 0;
+    let code = loop {
+        attempt += 1;
+        let answer = anon.raw(Method::POST, "/cli/device/code", &[], Some(&request)).await?;
+        match answer.rate_limited() {
+            Some(wait) if attempt < DEVICE_CODE_ATTEMPTS => {
+                let secs = wait.unwrap_or(5).clamp(1, 60);
+                ui::warn(&format!("Core limita las peticiones de login desde esta red (429): reintento en {secs} s…"));
+                tokio::time::sleep(unit * u32::try_from(secs).unwrap_or(5)).await;
+            }
+            _ if (200..300).contains(&answer.status) && answer.body["success"] != json!(false) => {
+                break answer.body["data"].clone();
+            }
+            _ => {
+                return Err(anyhow::Error::from(api_error(answer.status, &answer.body)))
+                    .context("no se pudo iniciar el login por dispositivo");
+            }
+        }
+    };
     let device_code = code["device_code"]
         .as_str()
         .ok_or_else(|| fail(Kind::Api, "La API no devolvió device_code."))?
@@ -147,7 +169,6 @@ async fn device_login(ctx: &mut Ctx, no_browser: bool) -> Result<()> {
         eprintln!("{}", c.dim("Esperando la aprobación…"));
     }
 
-    let unit = super::poll_unit();
     let deadline = Instant::now() + unit * u32::try_from(expires_in).unwrap_or(600);
     loop {
         tokio::time::sleep(unit * u32::try_from(interval).unwrap_or(5)).await;
@@ -157,6 +178,14 @@ async fn device_login(ctx: &mut Ctx, no_browser: bool) -> Result<()> {
         let answer = anon
             .raw(Method::POST, "/cli/device/token", &[], Some(&json!({"device_code": device_code})))
             .await?;
+        if let Some(wait) = answer.rate_limited() {
+            // Not a failure: wait what Core asks (beyond the interval already
+            // slept) and keep polling until the code expires.
+            let secs = wait.unwrap_or(interval).max(1);
+            ui::warn(&format!("Core limita las consultas desde esta red (429): sigo esperando la aprobación, próxima consulta en {secs} s…"));
+            tokio::time::sleep(unit * u32::try_from(secs.saturating_sub(interval)).unwrap_or(0)).await;
+            continue;
+        }
         if (200..300).contains(&answer.status) {
             let data = &answer.body["data"];
             let token = data["token"]
@@ -354,27 +383,50 @@ pub async fn token_list(ctx: &Ctx) -> Result<()> {
     })
 }
 
-pub async fn token_revoke(ctx: &Ctx, query: String, dry: bool) -> Result<()> {
+pub async fn token_revoke(ctx: &Ctx, query: String, confirm: Option<String>, dry: bool) -> Result<()> {
     let api = ctx.api()?;
+    // The token in use, to know whether this closes the current session.
+    let current = api.get("/cli/whoami").await.ok().map(|w| w["token"].clone()).filter(|t| !t.is_null());
     // An id goes straight to the API: a scoped token cannot list tokens but
     // can revoke itself (fdt token revoke <su id>, from fdt whoami).
-    let token = match uuid::Uuid::parse_str(query.trim()) {
-        Ok(id) => json!({"id": id.to_string(), "name": id.to_string()}),
-        Err(_) => {
-            let items = token_items(&api.get("/users/me/cli-tokens").await?);
-            resolve::pick(&items, &query, &["name"], "token", "fdt token list")?
-        }
+    let listed = match api.get("/users/me/cli-tokens").await {
+        Ok(data) => Some(token_items(&data)),
+        Err(_) if uuid::Uuid::parse_str(query.trim()).is_ok() => None,
+        Err(e) => return Err(e),
     };
-    let path = format!("/users/me/cli-tokens/{}", enc(&resolve::id(&token)));
+    let token = match (uuid::Uuid::parse_str(query.trim()), &listed) {
+        (Ok(id), Some(items)) => items
+            .iter()
+            .find(|t| t["id"].as_str().is_some_and(|x| x.eq_ignore_ascii_case(&id.to_string())))
+            .cloned()
+            .unwrap_or_else(|| json!({"id": id.to_string()})),
+        (Ok(id), None) => json!({"id": id.to_string()}),
+        (Err(_), Some(items)) => resolve::pick(items, &query, &["name"], "token", "fdt token list")?,
+        (Err(_), None) => unreachable!("a name without the list already returned"),
+    };
+    let id = resolve::id(&token);
+    let is_current = current.as_ref().is_some_and(|c| c["id"].as_str().is_some_and(|x| x.eq_ignore_ascii_case(&id)));
+    let kind = token["kind"].as_str().or_else(|| if is_current { current.as_ref()?["kind"].as_str() } else { None });
+    let label = token["name"].as_str().filter(|n| !n.is_empty()).map_or_else(|| id.clone(), str::to_owned);
+    // A session ends, and takes the tokens created with it along: confirm,
+    // also in a dry run (it would pass where the real one is refused).
+    if kind == Some("session") || is_current {
+        if is_current {
+            ui::warn("Es el token que estás usando: fdt dejará de tener sesión aquí (fdt login para volver).");
+        }
+        ui::warn("Revocar una sesión revoca también, en cascada, los tokens que se crearon con ella.");
+        ctx.confirm(&label, confirm.as_deref(), "revocar la sesión")?;
+    }
+    let path = format!("/users/me/cli-tokens/{}", enc(&id));
     if dry {
         return dry_run(ctx, "token revoke", "DELETE", &path, None);
     }
     let data = api.delete(&path).await?;
     // Revoking a session token also revokes the tokens created with it.
     let cascade = data["cascade_revoked"].as_u64().unwrap_or(0);
-    ui::success(&format!("Token «{}» revocado.", s(&token, "name")));
+    ui::success(&format!("Token «{label}» revocado."));
     if cascade > 0 {
         ui::info(&format!("También se revocaron {cascade} token(s) creados con esa sesión."));
     }
-    ctx.out.print(&json!({"ok": true, "revoked": resolve::id(&token), "cascade_revoked": cascade}), String::new)
+    ctx.out.print(&json!({"ok": true, "revoked": id, "cascade_revoked": cascade, "current": is_current}), String::new)
 }

@@ -22,15 +22,15 @@ fdt org usage --json                                   # cupo de bases
 fdt db create tienda-pg --project tienda --wait --if-not-exists --dry-run --json
 fdt db create tienda-pg --project tienda --wait --if-not-exists --json     # --engine mongo para MongoDB
 fdt db show tienda-pg --json                           # sin contraseña
-fdt env set DATABASE_URL --from-db tienda-pg --service api
-fdt env list --service api --json                      # DATABASE_URL aparece enmascarada
+fdt env set DATABASE_URL --from-db tienda-pg -s tienda-web
+fdt env list -s tienda-web --json                      # DATABASE_URL aparece enmascarada
 ```
 
 - `--wait` (por defecto hasta 10 min) termina con `data.status` = `ready`. `failed` → exit 1 con `error.message`; `timeout` → `fdt db show tienda-pg --json` y espera, no recrees.
-- Nombre: 3-32, `a-z0-9-`. Motor: `postgres` (por defecto) o `mongo`. `--db-name` / `--db-user` eligen el nombre interno y el usuario (por defecto `fd_<org>_<nombre>`).
+- Nombre: 3-32, `a-z0-9-`. Motor: `postgres` (por defecto) o `mongo`, si la organización lo ofrece (`engines` en `fdt db list --json`; si no, exit 2 antes de enviar). `--db-name` / `--db-user` eligen el nombre interno y el usuario (por defecto `fd_<org>_<nombre>`).
 - `--wait` que agota `--timeout` sale con 8: la base sigue creándose.
 - Si la base ya existe sin proyecto: `fdt db link tienda-pg --project tienda` (`db unlink` la saca; la base sigue existiendo).
-- `--from-db` guarda la cadena como **secreto** y nunca la imprime. Para Mongo, nombra la variable que use la app (`MONGO_URL`, `MONGODB_URI`…).
+- `--from-db` guarda la cadena como **secreto** y nunca la imprime. Con `--dry-run` no lee la contraseña (vale con un token `read` y no deja lectura de secreto en la auditoría). Para Mongo, nombra la variable que use la app (`MONGO_URL`, `MONGODB_URI`…).
 - `env set` redespliega el servicio si ya tiene imagen: avisa si es producción.
 - exit 6 `quota.deploy.databases`: para e informa.
 
@@ -43,8 +43,8 @@ fdt env list --service api --json                      # DATABASE_URL aparece en
 | Requisito | ninguno | que la base tenga acceso público (`public_host` no vacío en `db show`) |
 
 ```sh
-fdt env set DATABASE_URL --from-db tienda-pg --service api            # interna: lo normal
-fdt env set DATABASE_URL --from-db tienda-pg --public --service api   # solo si el servicio debe salir por internet; evítalo
+fdt env set DATABASE_URL --from-db tienda-pg -s tienda-web            # interna: lo normal
+fdt env set DATABASE_URL --from-db tienda-pg --public -s tienda-web   # solo si el servicio debe salir por internet; evítalo
 ```
 
 Sin acceso público, `--public` falla con exit 1 y "usa la cadena interna".
@@ -57,16 +57,16 @@ No hay comando para activar el acceso público: es del panel.
 
 ## Borrar
 
-`fdt db delete <base> --confirm <nombre exacto>` destruye los datos y no hay
+`fdt db delete <base> --confirm <nombre exacto>` (también con `--dry-run`) destruye los datos y no hay
 respaldos ni restauración en `fdt`. Solo con permiso explícito de la persona
 para esa base, tras `--dry-run`.
 
 ## Cambiar usuario o contraseña (Postgres)
 
 ```sh
-fdt db set-credentials tienda-pg --password-from-env NEW_PG_PASSWORD --dry-run --json
+fdt db set-credentials tienda-pg --password-from-env NEW_PG_PASSWORD --confirm tienda-pg --dry-run --json
 fdt db set-credentials tienda-pg --password-from-env NEW_PG_PASSWORD --confirm tienda-pg --json
-fdt env set DATABASE_URL --from-db tienda-pg --service api     # las apps no se actualizan solas
+fdt env set DATABASE_URL --from-db tienda-pg -s tienda-web     # las apps no se actualizan solas
 ```
 
 Corta las sesiones abiertas: las apps fallan hasta que actualices su

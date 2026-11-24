@@ -330,14 +330,14 @@ async fn plan_quota_exits_6_with_the_fix() {
         .mount(&env.server)
         .await;
     Mock::given(method("POST"))
-        .and(path(format!("/organizations/{ORG}/deploy/services")))
+        .and(path(format!("/organizations/{ORG}/apps/app1/deploy/configure")))
         .respond_with(ResponseTemplate::new(403).set_body_json(json!({"success": false, "status_code": 403,
             "error": {"code": 403, "message": "Deploy service limit reached", "scope": "quota.deploy.services",
                 "meta": {"limit_key": "max_deploy_services", "limit": 1, "used": 1}}})))
         .expect(1)
         .mount(&env.server)
         .await;
-    let run = env.run(&["service", "create", "api", "--repo", "acme/tienda-api", "--size", "512"]).await;
+    let run = env.run(&["service", "create", "tienda-api", "--repo", "acme/tienda-api", "--size", "512"]).await;
     assert_eq!(run.code, 6, "{}", run.stderr);
     let e = run.error();
     assert_eq!(e["kind"], "quota");
@@ -346,9 +346,9 @@ async fn plan_quota_exits_6_with_the_fix() {
     assert_eq!(e["details"]["meta"]["limit"], 1);
     let req = env.server.received_requests().await.unwrap().into_iter().find(|r| r.method.as_str() == "POST").unwrap();
     let body: Value = serde_json::from_slice(&req.body).unwrap();
-    assert_eq!(body["app_id"], "app1");
     assert_eq!(body["memory_mb"], 512);
-    assert_eq!(body["slug"], "api");
+    assert_eq!(body["subdomain"], "tienda-api");
+    assert!(body.get("slug").is_none(), "configure refuses slug (deploy.slug_not_allowed)");
 }
 
 #[tokio::test]
@@ -431,6 +431,11 @@ async fn link_writes_fdt_toml_and_commands_use_it() {
     Mock::given(method("GET"))
         .and(path(format!("/organizations/{ORG}")))
         .respond_with(ok(json!({"id": ORG, "name": "Acme"})))
+        .mount(&env.server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path(format!("/organizations/{ORG}/projects/{PROJECT}/apps")))
+        .respond_with(ok(json!([{"id": "app1"}])))
         .mount(&env.server)
         .await;
     let run = env.run(&["link", "--project", "tienda", "--service", "api"]).await;
@@ -637,7 +642,9 @@ async fn delete_needs_the_exact_name_and_dry_run_sends_nothing() {
     assert_eq!(none.error()["hint"], "--confirm Tienda");
     let wrong = env.run(&["project", "delete", "tienda", "--confirm", "tienda"]).await;
     assert_eq!(wrong.code, 2, "the name must match exactly");
-    let dry = env.run(&["project", "delete", "tienda", "--dry-run"]).await;
+    let dry_unconfirmed = env.run(&["project", "delete", "tienda", "--dry-run"]).await;
+    assert_eq!(dry_unconfirmed.code, 2, "a dry run needs --confirm too");
+    let dry = env.run(&["project", "delete", "tienda", "--dry-run", "--confirm", "Tienda"]).await;
     assert_eq!(dry.code, 0);
     let plan = dry.json();
     assert_eq!(plan["dry_run"], true);
@@ -941,7 +948,11 @@ async fn service_restart_pause_and_resume() {
     let unconfirmed = env.run(&["service", "pause", "api"]).await;
     assert_eq!(unconfirmed.code, 2);
     assert_eq!(unconfirmed.error()["kind"], "confirmation_required");
-    let dry = env.run(&["service", "pause", "api", "--dry-run"]).await;
+    // A dry run asks for --confirm too: it would pass where the real one is refused.
+    let dry_unconfirmed = env.run(&["service", "pause", "api", "--dry-run"]).await;
+    assert_eq!(dry_unconfirmed.code, 2);
+    assert_eq!(dry_unconfirmed.error()["scope"], "fdt.confirmation_required");
+    let dry = env.run(&["service", "pause", "-s", "api", "--confirm", "api", "--dry-run"]).await;
     assert_eq!(dry.json()["path"], format!("{base}/pause"));
     let paused = env.run(&["service", "pause", "api", "--confirm", "api"]).await;
     assert_eq!(paused.code, 0, "{}", paused.stderr);
@@ -1064,11 +1075,12 @@ async fn cli_token_scopes_exit_4_with_what_is_needed() {
         .await;
     Mock::given(method("GET"))
         .and(path(format!("/organizations/{ORG}/apps")))
-        .respond_with(ok(json!([{"id": "app1", "repository": {"full_name": "acme/api"}}])))
+        .respond_with(ok(json!([{"id": "app1", "repository": {"full_name": "acme/api"}},
+            {"id": "app2", "repository": {"full_name": "acme/web"}}])))
         .mount(&env.server)
         .await;
     Mock::given(method("POST"))
-        .and(path(format!("/organizations/{ORG}/deploy/services")))
+        .and(path(format!("/organizations/{ORG}/apps/app2/deploy/configure")))
         .respond_with(err(403, "cli.token_scope"))
         .mount(&env.server)
         .await;
@@ -1081,7 +1093,7 @@ async fn cli_token_scopes_exit_4_with_what_is_needed() {
     assert_eq!(level.code, 4);
     assert_eq!(level.error()["scope"], "cli.token_level");
     assert!(level.error()["hint"].as_str().unwrap().contains("--level admin"));
-    let scoped = env.run(&["service", "create", "web", "--repo", "acme/api"]).await;
+    let scoped = env.run(&["service", "create", "web", "--repo", "acme/web"]).await;
     assert_eq!(scoped.code, 4);
     let message = scoped.error()["message"].as_str().unwrap().to_owned();
     assert!(message.contains("crear servicios") && message.contains("project_ids"), "{message}");
@@ -1316,7 +1328,13 @@ async fn service_create_dry_run_shows_the_body_it_sends_and_the_real_url() {
     let env = Env::new().await.with_org().await;
     Mock::given(method("GET"))
         .and(path(format!("/organizations/{ORG}/apps")))
-        .respond_with(ok(json!([{"id": "app1", "slug": "api", "repository": {"full_name": "acme/api"}}])))
+        .respond_with(ok(json!([{"id": "app1", "slug": "api", "repository": {"full_name": "acme/Deploy_Test.API"}}])))
+        .mount(&env.server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path(format!("/organizations/{ORG}/deploy/services")))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"success": true, "data": [],
+            "meta": {"limits": {"service_memory_mb_options": [256]}}})))
         .mount(&env.server)
         .await;
     Mock::given(method("GET"))
@@ -1324,9 +1342,397 @@ async fn service_create_dry_run_shows_the_body_it_sends_and_the_real_url() {
         .respond_with(ok(json!({"suffix": "acme", "domain": "foundathyon.dev"})))
         .mount(&env.server)
         .await;
-    let run = env.run(&["service", "create", "web", "--repo", "acme/api", "--dry-run"]).await;
+    let run = env.run(&["service", "create", "web", "--repo", "acme/Deploy_Test.API", "--dry-run"]).await;
     assert_eq!(run.code, 0, "{}", run.stderr);
-    assert!(run.json()["body"].get("env").is_none(), "no env → no env field: {}", run.stdout);
-    // POST …/deploy/services keeps the slug: https://<slug>.<domain>.
-    assert!(run.stderr.contains("https://web.foundathyon.dev"), "{}", run.stderr);
+    let plan = run.json();
+    assert!(plan["body"].get("env").is_none(), "no env → no env field: {}", run.stdout);
+    // The panel's route, the panel's defaults.
+    assert_eq!(plan["path"], format!("/organizations/{ORG}/apps/app1/deploy/configure"));
+    assert_eq!(plan["body"]["port"], 3000);
+    assert_eq!(plan["body"]["memory_mb"], 256);
+    assert_eq!(plan["body"]["subdomain"], "web");
+    assert_eq!(plan["body"]["workflow_mode"], "pull_request");
+    // configure puts the org suffix after the chosen part: that is the real URL.
+    assert_eq!(plan["url"], "https://web-acme.foundathyon.dev");
+    assert_eq!(plan["url_certain"], true);
+    assert_eq!(plan["service_memory_mb_options"], json!([256]));
+    assert!(run.stderr.contains("https://web-acme.foundathyon.dev") && run.stderr.contains("256"), "{}", run.stderr);
+
+    // Without a subdomain Core draws it: the dry run does not promise one.
+    let drawn = env.run(&["service", "create", "--repo", "acme/Deploy_Test.API", "--dry-run"]).await;
+    assert_eq!(drawn.code, 0, "{}", drawn.stderr);
+    assert_eq!(drawn.json()["url_certain"], false);
+    assert_eq!(drawn.json()["url"], "https://deploy-test-api-xxxxxxxx.foundathyon.dev");
+
+    // More memory than the plan allows: refused before sending, also in a dry run.
+    let big = env.run(&["service", "create", "web", "--repo", "acme/Deploy_Test.API", "--memory", "512", "--dry-run"]).await;
+    assert_eq!(big.code, 6, "{}", big.stderr);
+    assert_eq!(big.error()["scope"], "quota.deploy.service_memory");
+}
+
+#[tokio::test]
+async fn service_create_refuses_invalid_subdomains_locally() {
+    let env = Env::new().await;
+    // No mocks: nothing may reach the API.
+    for name in ["Bad_Name", "tienda.web", "web-"] {
+        let run = env.run(&["service", "create", name, "--repo", "acme/web"]).await;
+        assert_eq!(run.code, 2, "{name}: {}", run.stderr);
+        assert_eq!(run.error()["scope"], "deploy.subdomain_invalid");
+    }
+    assert!(env.server.received_requests().await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn service_create_if_not_exists_finds_the_app_service_whatever_its_suffix() {
+    let env = Env::new().await.with_org().await;
+    Mock::given(method("GET"))
+        .and(path(format!("/organizations/{ORG}/apps")))
+        .respond_with(ok(json!([{"id": "app1", "name": "deploy-test-api", "repository": {"full_name": "acme/deploy-test-api"}}])))
+        .mount(&env.server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path(format!("/organizations/{ORG}/deploy/services")))
+        .respond_with(ok(json!([{"id": SVC, "slug": "deploy-test-api-wscmaiud", "name": "deploy-test-api",
+            "app_id": "app1", "status": "live", "url": "https://deploy-test-api-wscmaiud.foundathyon.dev"}])))
+        .mount(&env.server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path(format!("/organizations/{ORG}/apps/app1/deploy/configure")))
+        .respond_with(err(500, "never"))
+        .expect(0)
+        .mount(&env.server)
+        .await;
+    let found = env.run(&["service", "create", "deploy-test-api", "--repo", "acme/deploy-test-api", "--if-not-exists"]).await;
+    assert_eq!(found.code, 0, "{}", found.stderr);
+    assert_eq!(found.json()["id"], SVC);
+    assert_eq!(found.json()["created"], false);
+    // Without --if-not-exists it does not let configure overwrite it.
+    let refused = env.run(&["service", "create", "otro", "--repo", "acme/deploy-test-api"]).await;
+    assert_eq!(refused.code, 1, "{}", refused.stderr);
+    assert_eq!(refused.error()["scope"], "fdt.service_exists");
+}
+
+#[tokio::test]
+async fn service_create_goes_through_configure_like_the_panel() {
+    let env = Env::new().await.with_org().await;
+    Mock::given(method("GET"))
+        .and(path(format!("/organizations/{ORG}/apps")))
+        .respond_with(ok(json!([{"id": "app1", "name": "web", "repository": {"full_name": "acme/web"}}])))
+        .mount(&env.server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path(format!("/organizations/{ORG}/deploy/services")))
+        .respond_with(ok(json!([])))
+        .mount(&env.server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path(format!("/organizations/{ORG}/deploy/subdomain")))
+        .respond_with(ok(json!({"suffix": "acme", "domain": "foundathyon.dev"})))
+        .mount(&env.server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path(format!("/organizations/{ORG}/apps/app1/deploy/configure")))
+        .and(body_json(json!({"subdomain": "tienda-web", "port": 3000, "memory_mb": 256,
+            "auto_deploy": false, "workflow_mode": "pull_request"})))
+        .respond_with(ResponseTemplate::new(201).set_body_json(json!({"success": true, "status_code": 201, "data": {
+            "service": {"id": SVC, "slug": "tienda-web-acme", "url": "https://tienda-web-acme.foundathyon.dev", "app_id": "app1"},
+            "workflow": {"mode": "pull_request", "status": "pull_request_open", "pull_request_url": "https://github.com/acme/web/pull/7"}}})))
+        .expect(1)
+        .mount(&env.server)
+        .await;
+    let run = env.run(&["service", "create", "tienda-web", "--repo", "acme/web", "--no-auto-deploy"]).await;
+    assert_eq!(run.code, 0, "{}", run.stderr);
+    let out = run.json();
+    assert_eq!(out["slug"], "tienda-web-acme");
+    assert_eq!(out["created"], true);
+    assert_eq!(out["workflow"]["status"], "pull_request_open");
+    assert!(run.stderr.contains("pull/7"), "{}", run.stderr);
+}
+
+#[tokio::test]
+async fn raw_api_errors_leave_stdout_empty_and_carry_the_body() {
+    let env = Env::new().await;
+    Mock::given(method("GET"))
+        .and(path("/gone"))
+        .respond_with(ResponseTemplate::new(404).set_body_string("404 page not found"))
+        .mount(&env.server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/core-404"))
+        .respond_with(err(404, "deploy.service_not_found"))
+        .mount(&env.server)
+        .await;
+    let run = env.run(&["api", "GET", "/gone"]).await;
+    assert_eq!(run.code, 5);
+    assert!(run.stdout.is_empty(), "stdout: {}", run.stdout);
+    let e = run.error();
+    assert_eq!(e["details"]["body"], "404 page not found");
+    assert!(e.get("scope").is_none());
+    assert!(e["message"].as_str().unwrap().contains("gateway"), "{e}");
+    let core = env.run(&["api", "GET", "/core-404"]).await;
+    assert!(core.stdout.is_empty());
+    assert_eq!(core.error()["scope"], "deploy.service_not_found");
+    assert_eq!(core.error()["details"]["body"]["error"]["scope"], "deploy.service_not_found");
+}
+
+#[tokio::test]
+async fn skills_remove_expands_all_validates_names_and_leaves_no_empty_dirs() {
+    let env = Env::new().await;
+    std::fs::create_dir_all(env.cwd.path().join(".git")).unwrap();
+    assert_eq!(env.run(&["skills", "add", "all"]).await.code, 0);
+    let unknown = env.run(&["skills", "remove", "no-such-skill"]).await;
+    assert_eq!(unknown.code, 5, "{}", unknown.stderr);
+    let all = env.run(&["skills", "remove", "all"]).await;
+    assert_eq!(all.code, 0, "{}", all.stderr);
+    assert!(all.json()["changed"].as_array().unwrap().len() >= 2);
+    assert!(!env.cwd.path().join(".claude").exists(), "no empty .claude/skills left");
+    assert!(!env.cwd.path().join(".agents").exists(), "no empty .agents/skills left");
+    let again = env.run(&["skills", "remove", "fdt-basics"]).await;
+    assert_eq!(again.code, 5, "not installed: {}", again.stderr);
+}
+
+#[tokio::test]
+async fn project_create_if_not_exists_with_two_namesakes_is_ambiguous() {
+    let env = Env::new().await.with_org().await;
+    Mock::given(method("GET"))
+        .and(path(format!("/organizations/{ORG}/projects")))
+        .respond_with(ok(json!([{"id": PROJECT, "name": "Tienda"}, {"id": "p2", "name": "tienda"}])))
+        .mount(&env.server)
+        .await;
+    let run = env.run(&["project", "create", "Tienda", "--if-not-exists"]).await;
+    assert_eq!(run.code, 2, "{}", run.stderr);
+    assert_eq!(run.error()["kind"], "ambiguous");
+    assert_eq!(run.error()["details"]["candidates"].as_array().unwrap().len(), 2);
+}
+
+#[tokio::test]
+async fn deploys_take_a_short_prefix_and_the_service_by_flag() {
+    let env = Env::new().await.with_org().await.with_service().await;
+    let base = format!("/organizations/{ORG}/deploy/services/{SVC}");
+    Mock::given(method("GET"))
+        .and(path(format!("{base}/deployments")))
+        .respond_with(ok(json!([{"id": "3f2a9c1d-0000", "status": "live"}, {"id": "b7000000-0000", "status": "failed"}])))
+        .mount(&env.server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path(format!("{base}/deployments/3f2a9c1d-0000")))
+        .respond_with(ok(json!({"deployment": {"id": "3f2a9c1d-0000", "status": "live"}})))
+        .mount(&env.server)
+        .await;
+    let short = env.run(&["deploys", "api", "3f"]).await;
+    assert_eq!(short.code, 0, "{}", short.stderr);
+    assert_eq!(short.json()["deployment"]["id"], "3f2a9c1d-0000");
+    let flag = env.run(&["deploys", "-s", "api", "3f2a"]).await;
+    assert_eq!(flag.code, 0, "{}", flag.stderr);
+    let job = env.run(&["deploys", "api", "--job", "1"]).await;
+    assert_eq!(job.code, 2);
+}
+
+#[tokio::test]
+async fn dry_runs_refuse_what_the_real_run_would() {
+    let env = with_live_service(Env::new().await.with_org().await).await;
+    let bad = env.run(&["rollback", "api", "--digest", "sha256:nope", "--dry-run"]).await;
+    assert_eq!(bad.code, 2, "{}", bad.stderr);
+    Mock::given(method("GET"))
+        .and(path(format!("/organizations/{ORG}/deploy/databases")))
+        .respond_with(ok(json!({"databases": [], "engines": ["postgres"]})))
+        .mount(&env.server)
+        .await;
+    let mongo = env.run(&["db", "create", "cache", "--engine", "mongo", "--dry-run"]).await;
+    assert_eq!(mongo.code, 2, "{}", mongo.stderr);
+    assert!(mongo.error()["message"].as_str().unwrap().contains("postgres"));
+    let pg = env.run(&["db", "create", "cache", "--dry-run"]).await;
+    assert_eq!(pg.code, 0, "{}", pg.stderr);
+    let unconfirmed = env.run(&["service", "delete", "api", "--dry-run"]).await;
+    assert_eq!(unconfirmed.code, 2);
+    let rotate = env.run(&["service", "rotate-registry-token", "api", "--dry-run"]).await;
+    assert_eq!(rotate.code, 2);
+}
+
+#[tokio::test]
+async fn install_workflow_uses_the_service_mode_and_warns_when_it_differs() {
+    let env = Env::new().await.with_org().await;
+    Mock::given(method("GET"))
+        .and(path(format!("/organizations/{ORG}/deploy/services")))
+        .respond_with(ok(json!([{"id": SVC, "slug": "web", "app_id": "app1", "workflow_mode": "commit", "branch": "main"}])))
+        .mount(&env.server)
+        .await;
+    let same = env.run(&["service", "install-workflow", "web", "--dry-run"]).await;
+    assert_eq!(same.code, 0, "{}", same.stderr);
+    assert_eq!(same.json()["body"]["workflow_mode"], "commit");
+    let other = env.run(&["service", "install-workflow", "web", "--mode", "pull_request", "--dry-run"]).await;
+    assert!(other.stderr.contains("workflow_mode commit"), "{}", other.stderr);
+}
+
+#[tokio::test]
+async fn env_set_from_db_dry_run_does_not_read_the_password() {
+    let env = Env::new().await.with_org().await.with_service().await;
+    Mock::given(method("GET"))
+        .and(path(format!("/organizations/{ORG}/deploy/databases")))
+        .respond_with(ok(json!({"databases": [{"id": DB, "name": "tienda-pg"}]})))
+        .mount(&env.server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path(format!("/organizations/{ORG}/deploy/databases/{DB}/credentials")))
+        .respond_with(err(403, "cli.token_level"))
+        .expect(0)
+        .mount(&env.server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path(format!("/organizations/{ORG}/deploy/services/{SVC}/env")))
+        .respond_with(ok(json!([])))
+        .mount(&env.server)
+        .await;
+    let dry = env.run(&["env", "set", "DATABASE_URL", "--from-db", "tienda-pg", "-s", "api", "--dry-run"]).await;
+    assert_eq!(dry.code, 0, "{}", dry.stderr);
+    assert_eq!(dry.json()["diff"]["added"], json!(["DATABASE_URL"]));
+    // env list without variables says so; list and pull take the service as an argument too.
+    let list = env.run(&["env", "list", "api"]).await;
+    assert_eq!(list.code, 0, "{}", list.stderr);
+    assert_eq!(list.json(), json!([]));
+    assert!(list.stderr.contains("no tiene variables"), "{}", list.stderr);
+    let unset = env.run(&["env", "unset", "NOPE", "-s", "api"]).await;
+    assert!(unset.stderr.contains("NOPE no existe"), "{}", unset.stderr);
+}
+
+#[tokio::test]
+async fn project_tokens_hear_that_a_missing_resource_may_be_out_of_scope() {
+    let env = Env::new().await.with_org().await;
+    Mock::given(method("GET"))
+        .and(path(format!("/organizations/{ORG}/deploy/services")))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"success": true, "data": [],
+            "meta": {"cli_filtered": true}})))
+        .mount(&env.server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path(format!("/organizations/{ORG}/projects")))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"success": true, "data": [],
+            "meta": {"cli_filtered": true}})))
+        .mount(&env.server)
+        .await;
+    for args in [["service", "show", "otro"], ["project", "show", "otro"]] {
+        let run = env.run(&args).await;
+        assert_eq!(run.code, 5);
+        assert!(run.error()["message"].as_str().unwrap().contains("fuera del alcance del token"), "{}", run.stderr);
+    }
+}
+
+#[tokio::test]
+async fn link_refuses_a_service_of_another_project() {
+    let env = Env::new().await.with_org().await.with_service().await;
+    Mock::given(method("GET"))
+        .and(path(format!("/organizations/{ORG}")))
+        .respond_with(ok(json!({"id": ORG, "name": "Acme"})))
+        .mount(&env.server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path(format!("/organizations/{ORG}/projects")))
+        .respond_with(ok(json!([{"id": PROJECT, "name": "Tienda"}])))
+        .mount(&env.server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path(format!("/organizations/{ORG}/projects/{PROJECT}/apps")))
+        .respond_with(ok(json!([{"id": "other-app"}])))
+        .mount(&env.server)
+        .await;
+    let run = env.run(&["link", "-p", "tienda", "-s", "api"]).await;
+    assert_eq!(run.code, 2, "{}", run.stderr);
+    assert!(!env.cwd.path().join(".fdt.toml").exists());
+}
+
+#[tokio::test]
+async fn revoking_the_current_session_needs_confirm() {
+    let env = Env::new().await;
+    let id = "55555555-5555-4555-8555-555555555555";
+    Mock::given(method("GET"))
+        .and(path("/cli/whoami"))
+        .respond_with(ok(json!({"user": {"email": "ana@acme.dev"}, "token": {"id": id, "kind": "session", "name": "fdt en mac"}})))
+        .mount(&env.server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/users/me/cli-tokens"))
+        .respond_with(ok(json!([{"id": id, "kind": "session", "name": "fdt en mac"}])))
+        .mount(&env.server)
+        .await;
+    Mock::given(method("DELETE"))
+        .and(path(format!("/users/me/cli-tokens/{id}")))
+        .respond_with(ok(json!({"id": id, "cascade_revoked": 2})))
+        .expect(1)
+        .mount(&env.server)
+        .await;
+    let refused = env.run(&["token", "revoke", "fdt en mac"]).await;
+    assert_eq!(refused.code, 2, "{}", refused.stderr);
+    assert_eq!(refused.error()["kind"], "confirmation_required");
+    let dry = env.run(&["token", "revoke", id, "--dry-run"]).await;
+    assert_eq!(dry.code, 2, "a dry run needs it too");
+    let done = env.run(&["token", "revoke", id, "--confirm", "fdt en mac"]).await;
+    assert_eq!(done.code, 0, "{}", done.stderr);
+    assert_eq!(done.json()["current"], true);
+}
+
+#[tokio::test]
+async fn device_login_waits_out_rate_limits() {
+    let env = Env::new().await;
+    // /device/code: one 429 with Retry-After, then the code.
+    Mock::given(method("POST"))
+        .and(path("/cli/device/code"))
+        .respond_with(ResponseTemplate::new(429).insert_header("Retry-After", "2").set_body_json(json!({
+            "success": false, "error": {"code": 429, "message": "slow", "scope": "cli.rate_limited", "meta": {"retry_after": 2}}})))
+        .up_to_n_times(1)
+        .with_priority(1)
+        .mount(&env.server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/cli/device/code"))
+        .respond_with(ok(json!({"device_code": "dev-123", "user_code": "ABCD-EFGH",
+            "verification_uri": "https://app.foundathyon.com/cli", "expires_in": 600, "interval": 1})))
+        .with_priority(2)
+        .mount(&env.server)
+        .await;
+    // /device/token: two 429s (header and meta only), then approved.
+    Mock::given(method("POST"))
+        .and(path("/cli/device/token"))
+        .respond_with(ResponseTemplate::new(429).insert_header("Retry-After", "3").set_body_string("too many"))
+        .up_to_n_times(1)
+        .with_priority(1)
+        .mount(&env.server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/cli/device/token"))
+        .respond_with(ResponseTemplate::new(429).set_body_json(json!({"success": false,
+            "error": {"code": 429, "message": "slow", "scope": "cli.rate_limited", "meta": {"retry_after": 2}}})))
+        .up_to_n_times(1)
+        .with_priority(2)
+        .mount(&env.server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/cli/device/token"))
+        .respond_with(ok(json!({"token": TOKEN, "token_id": "tok1", "kind": "session",
+            "user": {"id": "u1", "email": "ana@acme.dev"}})))
+        .with_priority(3)
+        .mount(&env.server)
+        .await;
+    let run = env.run_with(&["login", "--no-browser"], &[], None).await;
+    assert_eq!(run.code, 0, "{}", run.stderr);
+    assert_eq!(run.json()["user"]["email"], "ana@acme.dev");
+    assert!(run.stderr.contains("429"), "says it is waiting for the limit: {}", run.stderr);
+    let requests = env.server.received_requests().await.unwrap();
+    assert_eq!(requests.iter().filter(|r| r.url.path() == "/cli/device/code").count(), 2);
+    assert_eq!(requests.iter().filter(|r| r.url.path() == "/cli/device/token").count(), 3);
+}
+
+#[tokio::test]
+async fn confirmation_at_end_of_input_cancels_with_exit_2() {
+    // ui::ask_line returns None at EOF (unit test in ui.rs); here, the
+    // non-interactive path: no terminal → exit 2 right away, never waiting.
+    let env = Env::new().await.with_org().await;
+    Mock::given(method("GET"))
+        .and(path(format!("/organizations/{ORG}/projects")))
+        .respond_with(ok(json!([{"id": PROJECT, "name": "Tienda"}])))
+        .mount(&env.server)
+        .await;
+    let started = std::time::Instant::now();
+    let run = env.run_with(&["project", "delete", "tienda"], &[("FDT_TOKEN", TOKEN)], Some("")).await;
+    assert_eq!(run.code, 2);
+    assert!(started.elapsed() < std::time::Duration::from_secs(10));
 }

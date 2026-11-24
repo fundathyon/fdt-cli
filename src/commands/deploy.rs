@@ -154,6 +154,13 @@ pub async fn deploy(ctx: &Ctx, query: Option<String>, rebuild: bool, wait: Wait,
     ctx.out.print(&data, String::new)
 }
 
+/// `sha256:` and 64 lowercase hex digits.
+pub fn valid_digest(digest: &str) -> bool {
+    digest
+        .strip_prefix("sha256:")
+        .is_some_and(|h| h.len() == 64 && h.chars().all(|c| c.is_ascii_digit() || ('a'..='f').contains(&c)))
+}
+
 #[allow(clippy::too_many_arguments)]
 pub async fn rollback(
     ctx: &Ctx,
@@ -170,7 +177,13 @@ pub async fn rollback(
     let base = service_path(&org.id, &resolve::id(&service));
     let body = match (tag, digest, to) {
         (Some(t), None, None) => json!({"image_tag": t}),
-        (None, Some(d), None) => json!({"image_digest": d}),
+        (None, Some(d), None) => {
+            let d = d.trim().to_owned();
+            if !valid_digest(&d) {
+                return Err(fail(Kind::Usage, format!("--digest «{d}» no es un digest: sha256:<64 hex en minúsculas>.")));
+            }
+            json!({"image_digest": d})
+        }
         (None, None, Some(dep)) => {
             let items = api.get(&format!("{base}/deployments")).await?.as_array().cloned().unwrap_or_default();
             let d = resolve::pick(&items, &dep, &[], "deployment", &format!("fdt deploys {slug}"))?;
@@ -334,11 +347,22 @@ pub async fn logs(
             .into_iter()
             .flatten()
             .map(|l| {
-                let text = s(l, "text");
-                let text = if l["stream"] == "stderr" { c.red(&text) } else { text };
+                // stderr is where most programs log, not only errors: no red.
+                let text = l["text"].as_str().unwrap_or_default();
                 format!("{} {text}", c.gray(&s(l, "at")))
             })
             .collect::<Vec<_>>()
             .join("\n")
     })
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn digests_are_sha256_and_64_hex() {
+        assert!(super::valid_digest(&format!("sha256:{}", "a".repeat(64))));
+        assert!(!super::valid_digest("sha256:x"));
+        assert!(!super::valid_digest(&"a".repeat(64)));
+        assert!(!super::valid_digest(&format!("sha256:{}", "A".repeat(64))));
+    }
 }

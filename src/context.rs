@@ -224,7 +224,7 @@ impl Ctx {
                         let i = crate::ui::select("Servicio", &labels)?;
                         return Ok(services[i].clone());
                     }
-                    return Err(self.need("el servicio (argumento o --service)", "no hay servicio en .fdt.toml (fdt link)"));
+                    return Err(self.need("--service <servicio>", "no hay servicio en .fdt.toml (fdt link -s <servicio>)"));
                 }
             },
         };
@@ -243,11 +243,16 @@ impl Ctx {
             .hint(format!("--confirm {expected}"))
             .into()),
             None if self.interactive => {
-                let typed = crate::ui::ask(&format!("Vas a {action} «{expected}». Escribe su nombre para confirmar"))?;
-                if typed == expected {
-                    Ok(())
-                } else {
-                    Err(fail(Kind::Cancelled, "El nombre no coincide; no se hizo nada."))
+                match crate::ui::ask_line(&format!("Vas a {action} «{expected}». Escribe su nombre para confirmar")) {
+                    Some(typed) if typed == expected => Ok(()),
+                    Some(_) => Err(fail(Kind::Cancelled, "El nombre no coincide; no se hizo nada.")),
+                    // EOF or a read error: nobody can answer, so cancel (exit 2) instead of waiting.
+                    None => Err(Failure::new(
+                        Kind::ConfirmationRequired,
+                        format!("No se pudo leer la confirmación (fin de la entrada): no se hizo nada. {} «{expected}» exige --confirm con su nombre exacto.", capitalize(action)),
+                    )
+                    .hint(format!("--confirm {expected}"))
+                    .into()),
                 }
             }
             None => Err(Failure::new(

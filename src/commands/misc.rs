@@ -173,6 +173,7 @@ pub async fn status(ctx: &Ctx, project: Option<String>) -> Result<()> {
             .unwrap_or_default(),
         None => resolve::databases(&api, &org.id).await?,
     };
+    super::service::warn_paused(&services);
     let data = json!({"org": org, "project": project, "services": services, "databases": databases});
     ctx.out.print(&data, || {
         let header = format!(

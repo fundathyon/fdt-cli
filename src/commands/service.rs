@@ -41,11 +41,34 @@ pub async fn list(ctx: &Ctx, project: Option<String>) -> Result<()> {
     let (api, org) = super::org_api(ctx).await?;
     let project = ctx.project_opt(&api, &org, project.as_deref()).await?;
     let services = Value::Array(of_project(&api, &org.id, project.as_ref()).await?);
+    warn_paused(services.as_array().map_or(&[], |v| v));
     ctx.out.print(&services, || ui::table(&HEADERS, &rows(services.as_array().map_or(&[], |v| v))))
 }
 
+/// What a paused service looks like from outside: its URL answers a generic
+/// 502 from the edge, which says nothing about the pause.
+pub fn paused_note(v: &Value) -> Option<String> {
+    (v["status"] == "paused").then(|| {
+        let since = v["paused_at"].as_str().map(|_| format!(" desde {}", when(v, "paused_at"))).unwrap_or_default();
+        format!(
+            "{} está pausado{since} (0 contenedores): su URL responde 502 hasta fdt service resume {} --wait.",
+            s(v, "slug"),
+            s(v, "slug")
+        )
+    })
+}
+
+/// Says it on stderr for each paused service.
+pub fn warn_paused(services: &[Value]) {
+    for v in services {
+        if let Some(note) = paused_note(v) {
+            ui::warn(&note);
+        }
+    }
+}
+
 pub fn detail(v: &Value) -> String {
-    fields(&[
+    let mut text = fields(&[
         ("servicio", format!("{} ({})", s(v, "name"), s(v, "slug"))),
         ("id", s(v, "id")),
         ("estado", ui::status(&s(v, "status"))),
@@ -68,13 +91,20 @@ pub fn detail(v: &Value) -> String {
                 when(&v["latest_deployment"], "created_at")
             ),
         ),
-    ])
+    ]);
+    if let Some(note) = paused_note(v) {
+        text.push_str(&format!("\n\n{note}"));
+    }
+    text
 }
 
 pub async fn show(ctx: &Ctx, query: Option<String>) -> Result<()> {
     let (api, org) = super::org_api(ctx).await?;
     let service = ctx.service(&api, &org, query.as_deref()).await?;
     let data = api.get(&service_path(&org.id, &resolve::id(&service))).await?;
+    if ctx.out.json {
+        warn_paused(std::slice::from_ref(&data));
+    }
     ctx.out.print(&data, || detail(&data))
 }
 
@@ -472,6 +502,44 @@ pub async fn update(ctx: &Ctx, a: ServiceUpdate) -> Result<()> {
     ctx.out.print(&data, || detail(&data))
 }
 
+/// What deleting a service leaves in its GitHub repo (Core does not touch
+/// it), as the panel says it: the workflow and the secret with the registry
+/// token, now revoked.
+pub fn github_leftovers(service: &Value) -> Value {
+    const WORKFLOW: &str = ".github/workflows/foundathyon.yml";
+    const SECRET: &str = "FOUNDATHYON_REGISTRY_TOKEN";
+    let repo = service["app"]["repository_full_name"].as_str().filter(|r| !r.is_empty());
+    let branch = service["branch"].as_str().filter(|b| !b.is_empty());
+    let runs_on_push = service["auto_deploy"] != false;
+    json!({
+        "repository": repo,
+        "workflow_path": WORKFLOW,
+        "secret_name": SECRET,
+        "runs_on_push": runs_on_push,
+        "branch": branch,
+        "remove": [
+            format!("git rm {WORKFLOW} && git commit -m \"chore: remove Foundathyon deploy\" && git push"),
+            format!("gh secret delete {SECRET} --repo {}", repo.unwrap_or("<dueño/repo>")),
+        ],
+    })
+}
+
+fn leftovers_message(l: &Value) -> String {
+    let repo = l["repository"].as_str().map(|r| format!(" {r}")).unwrap_or_default();
+    let effect = match (l["runs_on_push"].as_bool(), l["branch"].as_str()) {
+        (Some(true), Some(b)) => format!("cada push a {b} correrá ese workflow y fallará al entrar al registry"),
+        (Some(true), None) => "cada push a la rama correrá ese workflow y fallará al entrar al registry".to_owned(),
+        _ => "si alguien corre ese workflow, fallará al entrar al registry".to_owned(),
+    };
+    format!(
+        "En el repo de GitHub{repo} se quedan {} y el secreto {} (su token queda revocado): {effect}. Quítalos con: {} · {} (o vuelve a configurar el deploy, que los reinstala con un token nuevo).",
+        s(l, "workflow_path"),
+        s(l, "secret_name"),
+        l["remove"][0].as_str().unwrap_or_default(),
+        l["remove"][1].as_str().unwrap_or_default(),
+    )
+}
+
 pub async fn delete(ctx: &Ctx, query: Option<String>, confirm: Option<String>, dry: bool) -> Result<()> {
     let (api, org) = super::org_api(ctx).await?;
     // The slug in --confirm is what protects it, also with the linked service.
@@ -480,11 +548,20 @@ pub async fn delete(ctx: &Ctx, query: Option<String>, confirm: Option<String>, d
     let path = service_path(&org.id, &resolve::id(&service));
     // Also in a dry run: it would pass where the real one is refused otherwise.
     ctx.confirm(&slug, confirm.as_deref(), "borrar el servicio")?;
+    let leftovers = github_leftovers(&service);
     if dry {
-        return dry_run(ctx, "service delete", "DELETE", &path, None);
+        ui::warn(&leftovers_message(&leftovers));
+        return dry_run_with(ctx, "service delete", "DELETE", &path, None, json!({"github_leftovers": leftovers}));
     }
-    let data = api.delete(&path).await?;
+    let mut data = api.delete(&path).await?;
     ui::success(&format!("Servicio «{slug}» en borrado (deleting): desaparece cuando el deployer confirma."));
+    ui::warn(&leftovers_message(&leftovers));
+    match &mut data {
+        Value::Object(map) => {
+            map.insert("github_leftovers".into(), leftovers);
+        }
+        other => *other = json!({"result": other.clone(), "github_leftovers": leftovers}),
+    }
     ctx.out.print(&data, String::new)
 }
 

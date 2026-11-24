@@ -2,7 +2,7 @@
 name: fdt-deploy
 description: Lleva un repo de GitHub a producción en Foundathyon de punta a punta con `fdt`: Dockerfile, proyecto, servicio, workflow de GitHub Actions, variables y secretos, `fdt deploy --wait` y verificación. Actívala cuando la persona diga "despliega esta app", "súbela a Foundathyon", "crea el servicio", "pon esto en producción" o quiera el primer deploy de un repo. Para redeploys de un servicio ya vivo basta fdt-basics.
 metadata:
-  version: "0.4.0"
+  version: "0.5.0"
   owner: fundathyon
 ---
 
@@ -123,7 +123,8 @@ fdt env list -s tienda-web --json     # secretos enmascarados
 
 - Valores no secretos pueden ir en `KEY=VALUE`. **Un secreto nunca en la línea de comandos** (`KEY=VALUE --secret`, `service create --secret K=V`): queda en el historial y en tu contexto, y fdt lo avisa. Usa `--stdin`, `--from-env` o `--from-file` (en `service create`: `--secret-from-env KEY[=VAR]` / `--secret-from-file KEY=RUTA`), o pide a la persona que ejecute `fdt env set KEY --secret` en su terminal (pregunta sin eco).
 - Bases de datos: skill `fdt-databases` (`--from-db`).
-- Cada cambio redespliega si ya hay imagen (la salida trae `redeploys` y `deployment`; con `--dry-run` también `redeploys`); fija las variables **antes del primer deploy**.
+- Cada cambio redespliega si ya hay imagen (la salida trae `redeploys` y `deployment`; con `--dry-run` también `redeploys`); fija las variables **antes del primer deploy**. Con `--wait` espera a que ese reinicio (`env_change`) quede `live` (exit 7 si falla).
+- El servicio va con `-s`; `fdt env set tienda-web-acme FOO=1` también vale (el slug lleva guion: no puede ser una variable).
 
 ## 5. Deploy y verificación
 
@@ -134,12 +135,15 @@ fdt deploy tienda-web --wait --timeout 15m --json
 
 - `--dry-run` trae `data.prediction`: `would` = `workflow` (sin imagen o con `--rebuild`) o `redeploy_or_workflow` (Core decide según la cabeza de la rama; `certain: false`).
 - Sin imagen aún, `deploy` lanza el workflow (`data.dispatched: true`, `reason: no_image|new_commits`) y `--wait` espera a que llegue la imagen y se despliegue. `--rebuild` fuerza un build nuevo.
+- `--rebuild --wait` cuando el build produce **la misma imagen** que ya corre: el registry no avisa y Core no crea deployment. fdt lo detecta (run nuevo terminado bien en `fdt service diagnose` y su imagen = la del deployment live) y sale con 0, `data.unchanged: true`, `data.unchanged_reason: "same_image"` y `data.deployment` = el live. Si la imagen del commit ya existía pero no es la que corre, sale con 1 y `error.hint` dice cómo desplegarla (`fdt deploy` sin `--rebuild`). Si el build falla, exit 7 con la URL del run.
 - Si con `--wait` aparecen varios deployments a la vez (otro deploy en paralelo), la salida trae `ambiguous: true` y `candidates`: confirma con `fdt deploys tienda-web --json` cuál es el tuyo.
 - Éxito: exit 0, `data.deployment.status` = `live`. `superseded` = otro deploy más nuevo lo reemplazó; revisa `fdt deploys tienda-web --json`.
-- Exit 7 (falló) u 8 (`timeout`, sigue en curso): `fdt-troubleshoot`.
+- Exit 7 (falló): `error.details.commands` trae `fdt deploys <svc> <id>` y `fdt logs <svc> --since <inicio>`; luego `fdt-troubleshoot`. Exit 8 (`timeout`): `error.message` dice qué vio del build (en cola, corriendo, terminó sin imagen nueva).
 - Verifica: `fdt status --json`, `fdt logs tienda-web --since 5m --json` y, si hay `health_path`, un GET a `data.url` con curl.
 
-Redeploy sin build: `fdt redeploy tienda-web --wait --json`. Volver a una imagen anterior: `fdt rollback tienda-web --to <deployment> --wait --json` (o `--tag`, `--digest`; pide admin).
+Redeploy sin build: `fdt redeploy tienda-web --wait --json` repite **la imagen que corre** (tras un rollback, la del rollback); `fdt deploy` vuelve a la cabeza de la rama. Volver a una imagen anterior: `fdt rollback tienda-web --to <deployment> --wait --json` (solo un deployment `live` o `superseded`: uno `failed` sale con 2; o `--tag`, `--digest`; pide admin).
+
+Borrar el servicio (`fdt service delete … --confirm <slug>`, con permiso) no toca GitHub: en el repo quedan `.github/workflows/foundathyon.yml` y el secreto `FOUNDATHYON_REGISTRY_TOKEN` (revocado), y con auto deploy cada push correrá el workflow y fallará. La salida (y el `--dry-run`) trae `data.github_leftovers.remove` con los comandos (`git rm …`, `gh secret delete …`); pide permiso antes de ejecutarlos.
 
 ## 6. Opcional: login en la app
 

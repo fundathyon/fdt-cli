@@ -2,7 +2,7 @@
 name: fdt-troubleshoot
 description: Diagnostica un deploy que falló o un servicio caído en Foundathyon con `fdt`: `service diagnose`, `deploys`, logs de los jobs del build en GitHub Actions y `logs` de ejecución. Incluye árbol de decisión por código de salida y `error.scope` (también `quota.*` y `cli.*`). Actívala cuando `fdt deploy --wait` salga con 7 u 8, un servicio no levante, se quede en awaiting_first_deploy, devuelva 5xx, o la persona pregunte "por qué no despliega" o "por qué está caído".
 metadata:
-  version: "0.4.0"
+  version: "0.5.0"
   owner: fundathyon
 ---
 
@@ -64,8 +64,9 @@ una imagen que funcionaba), `fdt service resume tienda-web --wait` (si `status` 
 
 ## Árbol por código de salida
 
-- **7** deploy falló: `deploys <svc> <id>` → `error_code`/`phase` → tabla de arriba.
-- **8 `timeout`**: sigue en curso. `fdt deploys tienda-web --json`; no lances otro deploy encima.
+- **7** deploy falló: ejecuta `error.details.commands.detail` (`fdt deploys <svc> <id>`: `error_code`/`phase` y el build con sus jobs) y `error.details.commands.logs` (`fdt logs <svc> --since <inicio>`: el contenedor, si llegó a arrancar) → tabla de arriba. Si el 7 viene del build (`error.details.workflow_run`), no hay deployment: abre el log del run (`details.run_url`) o `fdt service diagnose`.
+- **8 `timeout`**: no es un fallo confirmado. `error.message` dice qué vio fdt del build (run en cola, corriendo o terminado sin imagen nueva); `fdt service diagnose tienda-web --json` y `fdt deploys tienda-web --json`; no lances otro deploy encima.
+- `deploy --rebuild --wait` con 0 y `unchanged: true`: no es un error; el build dio la misma imagen y no hay deployment nuevo. Si querías reiniciar, `fdt redeploy <svc> --wait`.
 - **1 `api`/`network`**: reintenta una vez; si persiste, `fdt doctor --json`.
 - **2**: falta flag o nombre ambiguo; `error.hint`.
 - **3**: sin sesión → persona. **4**: sin permiso → `error.scope` y `error.hint` (abajo), `fdt whoami --json` (`fdt-basics`).
@@ -92,6 +93,7 @@ una imagen que funcionaba), `fdt service resume tienda-web --wait` (si `status` 
 | `cli.invalid_token` | token revocado (también en cascada al revocar la sesión que lo creó), caducado o mal formado: exit 3 | la persona crea otro o hace `fdt login` |
 | `cli.invalid_project` | `project_ids` con un id que no es uuid o de otra org (422) | `fdt project list` y usa sus ids |
 | `deploy.service_paused`, `deploy.not_paused` | restart de un pausado / resume de uno activo | `fdt service show tienda-web --json` y elige |
+| (sin error) URL con 502 genérico | el servicio está `paused` (0 contenedores); `fdt status` lo avisa | con permiso, `fdt service resume tienda-web --wait` |
 
 Para cualquier scope nuevo: lee `error.message` y `error.hint`; si no resuelven, informa con el JSON del error. Sin cuota tampoco se "arregla" con otra cuenta o `fdt api`.
 

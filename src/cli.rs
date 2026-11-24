@@ -23,7 +23,7 @@ use std::path::PathBuf;
 \x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20install-workflow · rotate-registry-token --confirm · restart · pause --confirm · resume [--wait]\n\
 \x20\x20deploys    deploy [--rebuild] [--wait --timeout] · redeploy [--wait] · rollback --tag|--digest|--to [--wait]\n\
 \x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20deploys [<id>] [--job] · logs [--tail --since --until]\n\
-\x20\x20env        list · set [--secret] [--stdin|--from-env|--from-file|--from-db] · unset · import <.env> · pull\n\
+\x20\x20env        list · set [--secret] [--stdin|--from-env|--from-file|--from-db] [--wait] · unset [--wait] · import <.env> [--wait] · pull\n\
 \x20\x20db         list · show · create [--engine --wait] · delete --confirm · url --reveal · credentials [--reveal]\n\
 \x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20set-credentials --confirm · link · unlink · connect\n\
 \x20\x20otros      api <MÉTODO> <ruta> · completions <shell> · skills [list|add|remove|update] · update [--check]\n\
@@ -158,7 +158,7 @@ pub enum Command {
         command: Box<ServiceCommand>,
     },
     /// Lanza un deploy: redespliega la imagen de la rama si ya existe, o lanza el workflow de GitHub Actions.
-    #[command(after_help = "Ejemplos:\n  fdt deploy tienda-web --wait --json\n  fdt deploy -s tienda-web --rebuild\n  fdt deploy --wait --timeout 20m   # el servicio de .fdt.toml")]
+    #[command(after_help = "Despliega la cabeza de la rama (también después de un rollback); fdt redeploy, en cambio, repite la imagen que corre.\n\nCon --rebuild y --wait: si el build produce la misma imagen que ya corre, el registry no avisa y Core no crea\ndeployment; fdt lo detecta con el run y la imagen de fdt service diagnose y termina con 0 y unchanged: true.\n\nEjemplos:\n  fdt deploy tienda-web --wait --json\n  fdt deploy -s tienda-web --rebuild\n  fdt deploy --wait --timeout 20m   # el servicio de .fdt.toml")]
     Deploy {
         #[command(flatten)]
         service: Svc,
@@ -171,7 +171,8 @@ pub enum Command {
         #[arg(long)]
         dry_run: bool,
     },
-    /// Redespliega la imagen actual (o la última que llegó) sin build.
+    /// Redespliega la imagen que corre ahora (o, si nunca hubo una live, la última que llegó), sin build.
+    #[command(after_help = "redeploy vs deploy:\n  fdt redeploy   vuelve a desplegar la imagen que corre ahora, sin mirar la rama. Después de un\n                 rollback se queda en la imagen del rollback (avisa si hay una más nueva).\n  fdt deploy     despliega la cabeza de la rama: su imagen si ya existe, o lanza el build. Es lo\n                 que te devuelve a la última versión después de un rollback.\n\nEjemplos:\n  fdt redeploy tienda-web --dry-run   # dice qué imagen redesplegaría (data.image, data.newer_image)\n  fdt redeploy tienda-web --wait")]
     Redeploy {
         #[command(flatten)]
         service: Svc,
@@ -191,7 +192,7 @@ pub enum Command {
         /// Digest de la imagen (sha256:<64 hex>).
         #[arg(long, conflicts_with = "to")]
         digest: Option<String>,
-        /// Id de un deployment anterior, o cualquier prefijo que no sea ambiguo: se usa su digest.
+        /// Id de un deployment anterior (live o superseded), o cualquier prefijo que no sea ambiguo: se usa su digest.
         #[arg(long, value_name = "DEPLOYMENT")]
         to: Option<String>,
         #[command(flatten)]
@@ -492,6 +493,7 @@ pub enum ServiceCommand {
     /// Cambia ajustes (nombre, rama, puerto, memoria, healthcheck, build).
     Update(ServiceUpdate),
     /// Borra un servicio. Exige --confirm <slug exacto>, también con --dry-run.
+    #[command(after_help = "No toca el repo de GitHub: allí quedan .github/workflows/foundathyon.yml y el secreto\nFOUNDATHYON_REGISTRY_TOKEN (revocado). Con auto deploy, cada push a la rama corre el workflow y falla al\nentrar al registry. Quítalos con:\n  git rm .github/workflows/foundathyon.yml && git commit -m \"chore: remove Foundathyon deploy\" && git push\n  gh secret delete FOUNDATHYON_REGISTRY_TOKEN --repo <dueño/repo>")]
     Delete {
         #[command(flatten)]
         service: Svc,
@@ -536,6 +538,7 @@ pub enum ServiceCommand {
         dry_run: bool,
     },
     /// Reinicia el contenedor con la misma imagen y ajustes (sin deployment nuevo).
+    #[command(after_help = "Termina cuando el deployer acepta el reinicio. No tiene --wait: no crea deployment y la API no\ndice cuándo el contenedor nuevo vuelve a responder. Para un reinicio que se pueda esperar: fdt redeploy --wait.")]
     Restart {
         #[command(flatten)]
         service: Svc,
@@ -579,7 +582,7 @@ pub enum EnvCommand {
         service: Svc,
     },
     /// Crea o cambia variables. Un cambio redespliega el servicio (env_change) si tiene imagen.
-    #[command(after_help = "Ejemplos:\n  fdt env set LOG_LEVEL=debug MODE=prod --service tienda-web\n  fdt env set STRIPE_KEY --secret --stdin -s tienda-web < key.txt\n  fdt env set STRIPE_KEY --secret --from-env STRIPE_KEY -s tienda-web\n  fdt env set DATABASE_URL --from-db tienda-pg -s tienda-web   # sin imprimir la URL")]
+    #[command(after_help = "El servicio va con -s; también vale primero (fdt env set tienda-web-acme FOO=1) cuando no puede ser\nun nombre de variable (un slug lleva guion). --wait espera al reinicio (deployment env_change).\n\nEjemplos:\n  fdt env set LOG_LEVEL=debug MODE=prod --service tienda-web --wait\n  fdt env set STRIPE_KEY --secret --stdin -s tienda-web < key.txt\n  fdt env set STRIPE_KEY --secret --from-env STRIPE_KEY -s tienda-web\n  fdt env set DATABASE_URL --from-db tienda-pg -s tienda-web   # sin imprimir la URL")]
     Set {
         /// KEY=VALUE (o solo KEY con --stdin, --from-env, --from-file o --from-db).
         #[arg(required = true, value_name = "KEY=VALUE")]
@@ -607,6 +610,8 @@ pub enum EnvCommand {
         /// Muestra el cambio sin escribirlo (con --from-db no lee la contraseña de la base).
         #[arg(long)]
         dry_run: bool,
+        #[command(flatten)]
+        wait: Wait,
     },
     /// Quita variables. Avisa de las que no existen.
     Unset {
@@ -616,6 +621,8 @@ pub enum EnvCommand {
         service: SvcFlag,
         #[arg(long)]
         dry_run: bool,
+        #[command(flatten)]
+        wait: Wait,
     },
     /// Sube un archivo .env y lo mezcla con lo que hay.
     Import {
@@ -634,6 +641,8 @@ pub enum EnvCommand {
         replace: bool,
         #[arg(long)]
         dry_run: bool,
+        #[command(flatten)]
+        wait: Wait,
     },
     /// Baja las variables no secretas en formato .env (los secretos van como comentario).
     Pull {
@@ -771,8 +780,15 @@ pub async fn main() {
             let json = std::env::args().any(|a| a == "--json") || !std::io::stderr().is_terminal();
             let code = error.exit_code();
             if code != 0 && json {
-                let message = error.kind().to_string();
                 let detail = error.to_string();
+                // The first line says what was wrong ("invalid value 'ayer' for
+                // '--since': …"); the kind alone ("invalid value for one of the
+                // arguments") does not.
+                let message = detail
+                    .lines()
+                    .find(|l| !l.trim().is_empty())
+                    .map(|l| l.trim().trim_start_matches("error: ").to_owned())
+                    .unwrap_or_else(|| error.kind().to_string());
                 let body = serde_json::json!({"ok": false, "error": {
                     "kind": "usage", "exit_code": 2, "scope": "fdt.usage", "message": message, "detail": detail.trim(),
                     "hint": "fdt <comando> --help",
@@ -896,12 +912,12 @@ pub async fn run(cli: Cli) -> Result<()> {
         Command::Logs { service: s, tail, since, until } => deploy::logs(&ctx, s.get(), tail, since, until).await,
         Command::Env { command } => match command {
             EnvCommand::List { service: s } => env::list(&ctx, s.get()).await,
-            EnvCommand::Set { assignments, service: s, secret, from_db, from_env, from_file, public, stdin, dry_run } => {
-                env::set(&ctx, env::SetArgs { assignments, service: s.service, secret, from_db, from_env, from_file, public, stdin, dry_run }).await
+            EnvCommand::Set { assignments, service: s, secret, from_db, from_env, from_file, public, stdin, dry_run, wait } => {
+                env::set(&ctx, env::SetArgs { assignments, service: s.service, secret, from_db, from_env, from_file, public, stdin, dry_run, wait }).await
             }
-            EnvCommand::Unset { keys, service: s, dry_run } => env::unset(&ctx, keys, s.service, dry_run).await,
-            EnvCommand::Import { file, service: s, secret, secret_keys, replace, dry_run } => {
-                env::import(&ctx, file, s.service, secret, secret_keys, replace, dry_run).await
+            EnvCommand::Unset { keys, service: s, dry_run, wait } => env::unset(&ctx, keys, s.service, dry_run, wait).await,
+            EnvCommand::Import { file, service: s, secret, secret_keys, replace, dry_run, wait } => {
+                env::import(&ctx, file, s.service, secret, secret_keys, replace, dry_run, wait).await
             }
             EnvCommand::Pull { service: s, output } => env::pull(&ctx, s.get(), output).await,
         },

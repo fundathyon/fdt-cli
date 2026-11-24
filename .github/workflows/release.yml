@@ -107,9 +107,13 @@ jobs:
           lipo -archs stage/fdt
           case "${{ matrix.target }}" in
             x86_64-*) [ "$(lipo -archs stage/fdt)" = "x86_64" ] ;;
-            aarch64-*) [ "$(lipo -archs stage/fdt)" = "arm64" ] ;;
+            # Apple silicon refuses to run an unsigned binary; the linker signs arm64 ad hoc.
+            # It does not sign x86_64, and Intel Macs do not need it.
+            aarch64-*)
+              [ "$(lipo -archs stage/fdt)" = "arm64" ]
+              codesign --verify --verbose stage/fdt
+              ;;
           esac
-          codesign --verify --verbose stage/fdt
       - name: Smoke test
         if: matrix.smoke
         shell: bash

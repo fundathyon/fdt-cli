@@ -42,7 +42,11 @@ pub fn parse_instant(text: &str) -> std::result::Result<chrono::DateTime<chrono:
     if let Ok(t) = chrono::DateTime::parse_from_rfc3339(text.trim()) {
         return Ok(t.with_timezone(&chrono::Utc));
     }
-    let d = parse_duration(text).map_err(|_| format!("«{text}» no es una duración (10m, 2h) ni una fecha RFC 3339"))?;
+    let d = parse_duration(text).map_err(|_| {
+        format!(
+            "«{text}» no es una duración ni una fecha. Usa una duración hacia atrás (30s, 10m, 2h, 1d: --since 1d es «desde ayer a esta hora») o una fecha RFC 3339 con zona (2026-11-23T10:00:00Z, 2026-11-23T10:00:00-06:00)"
+        )
+    })?;
     Ok(chrono::Utc::now() - chrono::Duration::from_std(d).map_err(|e| e.to_string())?)
 }
 
@@ -90,6 +94,7 @@ mod tests {
         assert_eq!(t.to_rfc3339(), "2026-11-23T10:00:00+00:00");
         let ago = parse_instant("10m").unwrap();
         assert!((chrono::Utc::now() - ago).num_seconds() >= 599);
-        assert!(parse_instant("ayer").is_err());
+        let err = parse_instant("ayer").unwrap_err();
+        assert!(err.contains("1d") && err.contains("2026-11-23T10:00:00Z"), "{err}");
     }
 }

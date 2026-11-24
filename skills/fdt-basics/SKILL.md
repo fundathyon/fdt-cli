@@ -2,7 +2,7 @@
 name: fdt-basics
 description: Reglas base para operar la infraestructura de una organización en Foundathyon con el CLI `fdt` (proyectos, servicios, deploys, logs, variables, bases de datos). Actívala siempre que la persona pida desplegar, ver el estado o los logs de un servicio, cambiar variables de entorno, crear o conectar una base de datos, o cualquier cosa de Foundathyon, aunque no diga "fdt". Cubre comprobar sesión y contexto, --json, códigos de salida, niveles de token y qué nunca hacer sin permiso explícito.
 metadata:
-  version: "0.4.0"
+  version: "0.5.0"
   owner: fundathyon
 ---
 
@@ -39,12 +39,16 @@ fdt doctor --json      # si algo de lo anterior falla: API, sesión, org, .fdt.t
   `fdt.confirmation_required`…); una respuesta del gateway sin scope (404
   `page not found`) no trae `scope`.
 - El servicio va como argumento o con `-s/--service` (vale en todos los
-  comandos de servicio); en `env set|unset|import` solo `-s`.
+  comandos de servicio); en `env set|unset|import`, con `-s` (también vale el
+  slug primero, `fdt env set tienda-web-acme FOO=1`, porque lleva guion y no
+  puede ser un nombre de variable).
 - `--no-input`: nunca esperes un prompt; pasa todo por flags.
 - Nombre, slug o id valen. Si el nombre es ambiguo (exit 2, `error.details.candidates`) usa el id.
 - Antes de mutar algo que no tengas claro: `--dry-run` (muestra método, ruta y cuerpo sin secretos, no envía). Falla donde fallaría la ejecución real: también pide `--confirm`.
 - Al reintentar un `create`: `--if-not-exists` (devuelve el existente, no duplica; si hay varios con ese nombre, exit 2 con los candidatos).
-- Esperar es explícito: `deploy --wait --timeout 15m`, `redeploy|rollback|service resume --wait`, `db create --wait`.
+- Esperar es explícito: `deploy --wait --timeout 15m`, `redeploy|rollback|service resume --wait`, `env set|unset|import --wait` (espera el reinicio `env_change` si lo hay), `db create --wait`. `service restart` no tiene `--wait`: la API no dice cuándo vuelve a responder; si necesitas esperar, `fdt redeploy --wait`.
+- `fdt deploy` despliega la **cabeza de la rama**; `fdt redeploy` repite la **imagen que corre ahora** (después de un `rollback`, la del rollback; lo avisa y su `--dry-run` trae `data.image` y `data.newer_image`). Para volver a la última tras un rollback: `fdt deploy <svc> --wait`.
+- Un servicio `paused` tiene 0 contenedores y su URL responde un 502 genérico: `status`, `service list|show` y `logs` lo avisan por stderr. Se reanuda con `fdt service resume <svc> --wait` (pide permiso).
 - Nada imprime una contraseña o un token sin `--reveal` (`db url`, `db credentials`, `token create`, `service rotate-registry-token`).
 
 ## Códigos de salida
@@ -58,8 +62,8 @@ fdt doctor --json      # si algo de lo anterior falla: API, sesión, org, .fdt.t
 | 4 | sin permiso (`forbidden`; `error.scope` `cli.token_level`, `cli.token_scope` o `cli.token_forbidden`) | `error.hint` dice qué nivel o alcance falta; mira `fdt whoami --json` y "Niveles de token" |
 | 5 | no existe | `fdt <recurso> list --json`; revisa `--org` y `--project`. Con un token limitado a proyectos puede existir fuera de su alcance (el mensaje lo dice) |
 | 6 | cuota del plan (`error.scope` = `quota.*`) | `fdt org usage --json`; informa y para: no borres cosas ni busques atajos |
-| 7 | el deploy falló (`--wait`) | skill `fdt-troubleshoot` |
-| 8 | se acabó `--timeout` de `--wait` (`kind`: `timeout`) | sigue en curso: consulta `fdt deploys <svc> --json`; no repitas la mutación |
+| 7 | el deploy falló (`--wait`) | `error.details.commands` trae los comandos exactos (`detail`: `fdt deploys <svc> <id>`, `logs`: `fdt logs <svc> --since <inicio>`); skill `fdt-troubleshoot` |
+| 8 | se acabó `--timeout` de `--wait` (`kind`: `timeout`) | no es un fallo confirmado: lee `error.message` (dice qué vio del build) y consulta `fdt service diagnose <svc> --json` / `fdt deploys <svc> --json`; no repitas la mutación |
 
 ## Niveles de token
 

@@ -892,7 +892,8 @@ async fn rollback_to_a_deployment_uses_its_digest_and_waits() {
     let digest = format!("sha256:{}", "a".repeat(64));
     Mock::given(method("GET"))
         .and(path(format!("{base}/deployments")))
-        .respond_with(ok(json!([{"id": "3f2a9c1d-0000", "image_digest": digest}])))
+        .respond_with(ok(json!([{"id": "3f2a9c1d-0000", "status": "superseded", "image_digest": digest},
+            {"id": "bad00000-0000", "status": "failed", "error_code": "crashed", "image_digest": digest}])))
         .mount(&env.server)
         .await;
     Mock::given(method("POST"))
@@ -915,6 +916,13 @@ async fn rollback_to_a_deployment_uses_its_digest_and_waits() {
     let run = env.run(&["rollback", "api", "--to", "3f2a9c1d", "--wait"]).await;
     assert_eq!(run.code, 0, "{}", run.stderr);
     assert_eq!(run.json()["status"], "live");
+    // A deployment that never served is not a point to go back to (Core would accept it).
+    let failed = env.run(&["rollback", "api", "--to", "bad0", "--dry-run"]).await;
+    assert_eq!(failed.code, 2, "{}", failed.stderr);
+    let e = failed.error();
+    assert!(e["message"].as_str().unwrap().contains("terminó en failed, crashed"), "{e}");
+    assert!(e["message"].as_str().unwrap().contains("--digest sha256:"), "{e}");
+    assert_eq!(e["details"]["deployment"]["status"], "failed");
 }
 
 #[tokio::test]
@@ -1778,4 +1786,280 @@ async fn install_workflow_defaults_to_commit_when_the_service_is_manual() {
     assert_eq!(run.code, 0, "{}", run.stderr);
     assert_eq!(run.json()["body"]["workflow_mode"], "commit");
     assert!(run.stderr.contains("git pull"), "{}", run.stderr);
+}
+
+// ---------------------------------------------------------------- prod test findings
+
+const DIGEST_LIVE: &str = "sha256:1111111111111111111111111111111111111111111111111111111111111111";
+const HEAD: &str = "abcdefabcdefabcdefabcdefabcdefabcdefabcd";
+
+fn check(id: &str, status: &str, code: &str, details: Value) -> Value {
+    json!({"id": id, "status": status, "code": code, "details": details})
+}
+
+/// A live service whose current deployment runs DIGEST_LIVE, built from HEAD.
+async fn live_with_history(env: &Env) {
+    let base = format!("/organizations/{ORG}/deploy/services/{SVC}");
+    Mock::given(method("GET"))
+        .and(path(format!("/organizations/{ORG}/deploy/services")))
+        .respond_with(ok(json!([{"id": SVC, "slug": "api-acme", "name": "api", "status": "live", "branch": "main",
+            "url": "https://api-acme.foundathyon.dev", "auto_deploy": true,
+            "app": {"repository_full_name": "acme/api"},
+            "current_deployment_id": "dep0", "latest_deployment": {"id": "dep0", "status": "live"}}])))
+        .mount(&env.server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path(format!("{base}/deployments")))
+        .respond_with(ok(json!([{"id": "dep0", "status": "live", "source": "registry_push",
+            "image_tag": HEAD, "image_digest": DIGEST_LIVE, "commit_sha": HEAD}])))
+        .mount(&env.server)
+        .await;
+}
+
+/// …/diagnostics: the first answer has the old run; the next ones, `run` and `image`.
+async fn diagnostics_after_dispatch(env: &Env, run: Value, image: Value) {
+    let base = format!("/organizations/{ORG}/deploy/services/{SVC}");
+    Mock::given(method("GET"))
+        .and(path(format!("{base}/diagnostics")))
+        .respond_with(ok(json!({"summary": "ok", "checks": [
+            check("workflow_run", "ok", "ok", json!({"run_url": "https://github.com/acme/api/actions/runs/1", "head_sha": HEAD, "conclusion": "success"})),
+            check("image_pushed", "ok", "ok", json!({"tag": HEAD, "digest": DIGEST_LIVE})),
+        ]})))
+        .up_to_n_times(1)
+        .with_priority(1)
+        .mount(&env.server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path(format!("{base}/diagnostics")))
+        .respond_with(ok(json!({"summary": "ok", "checks": [run, image]})))
+        .with_priority(2)
+        .mount(&env.server)
+        .await;
+}
+
+async fn mount_rebuild(env: &Env) {
+    Mock::given(method("POST"))
+        .and(path(format!("/organizations/{ORG}/deploy/services/{SVC}/deploy")))
+        .and(body_json(json!({"rebuild": true})))
+        .respond_with(ResponseTemplate::new(202).set_body_json(json!({"success": true,
+            "data": {"dispatched": true, "reason": "rebuild", "deployment": null}})))
+        .expect(1)
+        .mount(&env.server)
+        .await;
+}
+
+#[tokio::test]
+async fn rebuild_wait_with_the_same_image_ends_ok_as_unchanged() {
+    let env = Env::new().await.with_org().await;
+    live_with_history(&env).await;
+    mount_rebuild(&env).await;
+    diagnostics_after_dispatch(
+        &env,
+        check("workflow_run", "ok", "ok", json!({"run_url": "https://github.com/acme/api/actions/runs/2", "head_sha": HEAD, "conclusion": "success"})),
+        check("image_pushed", "ok", "ok", json!({"tag": HEAD, "digest": DIGEST_LIVE})),
+    )
+    .await;
+    let run = env.run(&["deploy", "api", "--rebuild", "--wait", "--timeout", "30s"]).await;
+    assert_eq!(run.code, 0, "{}", run.stderr);
+    let out = run.json();
+    assert_eq!(out["unchanged"], true);
+    assert_eq!(out["unchanged_reason"], "same_image");
+    assert_eq!(out["image_digest"], DIGEST_LIVE);
+    assert_eq!(out["deployment"]["id"], "dep0");
+    assert!(run.stderr.contains("Sin cambios"), "{}", run.stderr);
+}
+
+#[tokio::test]
+async fn rebuild_wait_exits_7_when_the_build_fails() {
+    let env = Env::new().await.with_org().await;
+    live_with_history(&env).await;
+    mount_rebuild(&env).await;
+    diagnostics_after_dispatch(
+        &env,
+        check("workflow_run", "error", "failed", json!({"run_url": "https://github.com/acme/api/actions/runs/2", "head_sha": HEAD, "conclusion": "failure"})),
+        check("image_pushed", "ok", "ok", json!({"tag": HEAD, "digest": DIGEST_LIVE})),
+    )
+    .await;
+    let run = env.run(&["deploy", "api", "--rebuild", "--wait", "--timeout", "30s"]).await;
+    assert_eq!(run.code, 7, "{}", run.stderr);
+    let e = run.error();
+    assert!(e["message"].as_str().unwrap().contains("actions/runs/2"), "{e}");
+}
+
+#[tokio::test]
+async fn rebuild_wait_of_an_image_that_is_not_live_says_how_to_deploy_it() {
+    let env = Env::new().await.with_org().await;
+    live_with_history(&env).await;
+    mount_rebuild(&env).await;
+    let other = format!("sha256:{}", "2".repeat(64));
+    diagnostics_after_dispatch(
+        &env,
+        check("workflow_run", "ok", "ok", json!({"run_url": "https://github.com/acme/api/actions/runs/2", "head_sha": "f".repeat(40), "conclusion": "success"})),
+        check("image_pushed", "ok", "ok", json!({"tag": "f".repeat(40), "digest": other})),
+    )
+    .await;
+    let run = env.run(&["deploy", "api", "--rebuild", "--wait", "--timeout", "30s"]).await;
+    assert_eq!(run.code, 1, "{}", run.stderr);
+    let e = run.error();
+    assert!(e["hint"].as_str().unwrap().contains("fdt deploy api-acme --wait"), "{e}");
+}
+
+#[tokio::test]
+async fn wait_for_an_image_times_out_saying_what_it_saw() {
+    let env = Env::new().await.with_org().await;
+    live_with_history(&env).await;
+    mount_rebuild(&env).await;
+    diagnostics_after_dispatch(
+        &env,
+        check("workflow_run", "pending", "in_progress", json!({"run_url": "https://github.com/acme/api/actions/runs/2"})),
+        check("image_pushed", "ok", "ok", json!({})),
+    )
+    .await;
+    let run = env.run(&["deploy", "api", "--rebuild", "--wait", "--timeout", "1s"]).await;
+    assert_eq!(run.code, 8, "{}", run.stderr);
+    let e = run.error();
+    let message = e["message"].as_str().unwrap();
+    assert!(message.contains("in_progress") && message.contains("fdt service diagnose api-acme"), "{message}");
+}
+
+#[tokio::test]
+async fn deploy_failure_says_the_exact_commands_to_see_why() {
+    let env = Env::new().await.with_org().await.with_service().await;
+    let base = format!("/organizations/{ORG}/deploy/services/{SVC}");
+    Mock::given(method("POST"))
+        .and(path(format!("{base}/redeploy")))
+        .respond_with(ResponseTemplate::new(202).set_body_json(json!({"success": true, "data": {"id": "dep7abcdef", "status": "queued"}})))
+        .mount(&env.server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path(format!("{base}/deployments/dep7abcdef")))
+        .respond_with(ok(json!({"deployment": {"id": "dep7abcdef", "status": "failed", "phase": "starting",
+            "error_code": "out_of_memory", "error_message": "", "started_at": "2026-11-24T10:00:00Z"}})))
+        .mount(&env.server)
+        .await;
+    let run = env.run(&["redeploy", "api", "--wait"]).await;
+    assert_eq!(run.code, 7, "{}", run.stderr);
+    let e = run.error();
+    assert_eq!(e["details"]["commands"]["detail"], "fdt deploys api dep7abcd");
+    assert_eq!(e["details"]["commands"]["logs"], "fdt logs api --since 2026-11-24T10:00:00Z");
+    assert!(e["message"].as_str().unwrap().contains("out_of_memory"));
+}
+
+#[tokio::test]
+async fn redeploy_after_a_rollback_says_which_image_and_how_to_get_back() {
+    let env = Env::new().await.with_org().await;
+    let base = format!("/organizations/{ORG}/deploy/services/{SVC}");
+    let old = format!("sha256:{}", "3".repeat(64));
+    Mock::given(method("GET"))
+        .and(path(format!("/organizations/{ORG}/deploy/services")))
+        .respond_with(ok(json!([{"id": SVC, "slug": "api-acme", "name": "api", "status": "live", "current_deployment_id": "rb1"}])))
+        .mount(&env.server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path(format!("{base}/deployments")))
+        .respond_with(ok(json!([
+            {"id": "rb1", "status": "live", "source": "rollback", "image_tag": "v1.0.0", "image_digest": old},
+            {"id": "dep0", "status": "superseded", "source": "registry_push", "image_tag": HEAD, "image_digest": DIGEST_LIVE},
+        ])))
+        .mount(&env.server)
+        .await;
+    let dry = env.run(&["redeploy", "api", "--dry-run"]).await;
+    assert_eq!(dry.code, 0, "{}", dry.stderr);
+    let out = dry.json();
+    assert_eq!(out["image"]["deployment_id"], "rb1");
+    assert_eq!(out["newer_image"]["deployment_id"], "dep0");
+    assert!(dry.stderr.contains("fdt deploy api-acme"), "{}", dry.stderr);
+    assert!(dry.stderr.contains("rollback"), "{}", dry.stderr);
+}
+
+#[tokio::test]
+async fn service_delete_warns_about_what_stays_in_the_repo() {
+    let env = Env::new().await.with_org().await;
+    live_with_history(&env).await;
+    Mock::given(method("DELETE"))
+        .and(path(format!("/organizations/{ORG}/deploy/services/{SVC}")))
+        .respond_with(ResponseTemplate::new(202).set_body_json(json!({"success": true, "data": {"id": SVC, "status": "deleting"}})))
+        .expect(1)
+        .mount(&env.server)
+        .await;
+    let dry = env.run(&["service", "delete", "api", "--confirm", "api-acme", "--dry-run"]).await;
+    assert_eq!(dry.code, 0, "{}", dry.stderr);
+    let l = dry.json()["github_leftovers"].clone();
+    assert_eq!(l["workflow_path"], ".github/workflows/foundathyon.yml");
+    assert_eq!(l["secret_name"], "FOUNDATHYON_REGISTRY_TOKEN");
+    assert_eq!(l["remove"][1], "gh secret delete FOUNDATHYON_REGISTRY_TOKEN --repo acme/api");
+    assert!(dry.stderr.contains("cada push a main"), "{}", dry.stderr);
+    let run = env.run(&["service", "delete", "api", "--confirm", "api-acme"]).await;
+    assert_eq!(run.code, 0, "{}", run.stderr);
+    assert_eq!(run.json()["status"], "deleting");
+    assert_eq!(run.json()["github_leftovers"]["repository"], "acme/api");
+}
+
+#[tokio::test]
+async fn env_set_takes_a_leading_slug_as_the_service_and_waits_for_the_restart() {
+    let env = Env::new().await.with_org().await;
+    live_with_history(&env).await;
+    let base = format!("/organizations/{ORG}/deploy/services/{SVC}");
+    Mock::given(method("GET"))
+        .and(path(format!("{base}/env")))
+        .respond_with(ok(json!([])))
+        .mount(&env.server)
+        .await;
+    Mock::given(method("PUT"))
+        .and(path(format!("{base}/env")))
+        .and(body_json(json!({"vars": [{"key": "FOO", "value": "1", "is_secret": false}]})))
+        .respond_with(ok(json!({"vars": [{"key": "FOO", "value": "1", "is_secret": false}],
+            "deployment": {"id": "env1", "status": "queued", "source": "env_change"}, "deployment_skipped_reason": null})))
+        .expect(1)
+        .mount(&env.server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path(format!("{base}/deployments/env1")))
+        .respond_with(ok(json!({"deployment": {"id": "env1", "status": "live", "source": "env_change"}})))
+        .mount(&env.server)
+        .await;
+    let run = env.run(&["env", "set", "api-acme", "FOO=1", "--wait"]).await;
+    assert_eq!(run.code, 0, "{}", run.stderr);
+    assert_eq!(run.json()["deployment"]["status"], "live");
+    assert!(run.stderr.contains("lo tomo como el servicio"), "{}", run.stderr);
+    // Something that is neither KEY=VALUE nor a variable name says the right form.
+    let bad = env.run(&["env", "set", "FOO=1", "tienda-web", "-s", "api"]).await;
+    assert_eq!(bad.code, 2, "{}", bad.stderr);
+    assert!(bad.error()["hint"].as_str().unwrap().contains("fdt env set KEY=VALUE"), "{}", bad.stderr);
+}
+
+#[tokio::test]
+async fn logs_since_explains_the_accepted_formats() {
+    let env = Env::new().await;
+    let run = env.run(&["logs", "api", "--since", "ayer", "--json"]).await;
+    assert_eq!(run.code, 2);
+    let message = run.error()["message"].as_str().unwrap().to_owned();
+    assert!(message.contains("ayer") && message.contains("10m") && message.contains("2026-11-23T10:00:00Z"), "{message}");
+}
+
+#[tokio::test]
+async fn a_paused_service_is_called_out_in_show_and_status() {
+    let env = Env::new().await.with_org().await;
+    Mock::given(method("GET"))
+        .and(path(format!("/organizations/{ORG}/deploy/services")))
+        .respond_with(ok(json!([{"id": SVC, "slug": "api-acme", "name": "api", "status": "paused",
+            "paused_at": "2026-11-24T09:00:00Z", "url": "https://api-acme.foundathyon.dev"}])))
+        .mount(&env.server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path(format!("/organizations/{ORG}/deploy/services/{SVC}")))
+        .respond_with(ok(json!({"id": SVC, "slug": "api-acme", "status": "paused"})))
+        .mount(&env.server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path(format!("/organizations/{ORG}/deploy/databases")))
+        .respond_with(ok(json!([])))
+        .mount(&env.server)
+        .await;
+    let show = env.run(&["service", "show", "api"]).await;
+    assert_eq!(show.code, 0, "{}", show.stderr);
+    assert!(show.stderr.contains("pausado") && show.stderr.contains("502"), "{}", show.stderr);
+    let status = env.run(&["status"]).await;
+    assert_eq!(status.code, 0, "{}", status.stderr);
+    assert!(status.stderr.contains("fdt service resume api-acme"), "{}", status.stderr);
 }

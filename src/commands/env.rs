@@ -5,9 +5,10 @@
 use super::service_path;
 use crate::api::Api;
 use crate::config::OrgRef;
+use crate::cli::Wait;
 use crate::context::{Ctx, dry_run_with};
 use crate::envfile::{self, Diff, Var};
-use crate::failure::{Kind, fail};
+use crate::failure::{Kind, fail, fail_hint};
 use crate::output::s;
 use crate::{resolve, ui};
 use anyhow::{Context as _, Result};
@@ -91,7 +92,9 @@ async fn apply(
     dry: bool,
     action: &str,
     argv_keys: &[String],
+    wait: Wait,
 ) -> Result<()> {
+    let deadline = std::time::Instant::now() + wait.timeout;
     let current = envfile::from_api(&t.api.get(&t.path).await?);
     let missing: Vec<&str> = unset.iter().filter(|k| !current.iter().any(|v| &v.key == *k)).map(String::as_str).collect();
     if !missing.is_empty() {
@@ -140,9 +143,22 @@ async fn apply(
     } else if let Some(reason) = result["deployment_skipped_reason"].as_str() {
         ui::info(&format!("Guardadas sin reiniciar ({reason}): se aplican al reanudar o en el próximo deploy."));
     }
+    let mut deployment = result["deployment"].clone();
+    if wait.wait {
+        if redeployed {
+            // The env_change deployment is the restart: it ends live (back
+            // online with the new variables) or failed (exit 7).
+            let slug = s(&t.service, "slug");
+            let base = service_path(&t.org.id, &resolve::id(&t.service));
+            deployment = super::deploy::wait_for(&t.api, &base, &resolve::id(&deployment), &slug, deadline).await?;
+            ui::success(&format!("{slug} está live con las variables nuevas."));
+        } else {
+            ui::info("--wait: no hay reinicio que esperar (no se creó deployment).");
+        }
+    }
     let out = json!({
         "changed": true, "diff": diff, "redeploys": redeployed,
-        "deployment": result["deployment"],
+        "deployment": deployment,
         "deployment_skipped_reason": result["deployment_skipped_reason"],
         "vars": masked(&result["vars"]),
     });
@@ -168,21 +184,50 @@ pub struct SetArgs {
     pub public: bool,
     pub stdin: bool,
     pub dry_run: bool,
+    pub wait: Wait,
 }
 
 fn check_key(key: &str) -> Result<()> {
     if envfile::valid_key(key) {
         Ok(())
     } else {
-        Err(fail(Kind::Usage, format!("Nombre de variable inválido: «{key}» (letras, dígitos y _)")))
+        Err(fail_hint(
+            Kind::Usage,
+            format!("Nombre de variable inválido: «{key}» (letras, dígitos y _, sin empezar por dígito)."),
+            "fdt env set KEY=VALUE [KEY=VALUE…] -s <servicio>",
+        ))
     }
 }
 
-pub async fn set(ctx: &Ctx, a: SetArgs) -> Result<()> {
+/// `fdt env set tienda-web-acme FOO=1` (the service first, as in the other
+/// commands) instead of `fdt env set FOO=1 -s tienda-web-acme`. Taken as the
+/// service only when it cannot be read any other way: no -s, the first word
+/// is not a variable name (slugs carry a hyphen) and every other word is a
+/// KEY=VALUE (or, for unset, a KEY).
+fn leading_service(service: &Option<String>, words: &[String], rest_ok: impl Fn(&str) -> bool) -> Option<String> {
+    let (first, rest) = words.split_first()?;
+    let unambiguous = service.is_none() && !rest.is_empty() && !first.contains('=') && !envfile::valid_key(first) && rest.iter().all(|w| rest_ok(w));
+    unambiguous.then(|| first.clone())
+}
+
+fn take_leading_service(service: &mut Option<String>, words: &mut Vec<String>, rest_ok: impl Fn(&str) -> bool, example: &str) {
+    if let Some(svc) = leading_service(service, words, rest_ok) {
+        words.remove(0);
+        ui::info(&format!("«{svc}» no es un nombre de variable: lo tomo como el servicio (la forma de siempre: {example} -s {svc})."));
+        *service = Some(svc);
+    }
+}
+
+pub async fn set(ctx: &Ctx, mut a: SetArgs) -> Result<()> {
+    let single = a.from_db.is_some() || a.stdin || a.from_env.is_some() || a.from_file.is_some();
+    if single {
+        take_leading_service(&mut a.service, &mut a.assignments, envfile::valid_key, "fdt env set KEY --stdin");
+    } else {
+        take_leading_service(&mut a.service, &mut a.assignments, |w| w.split_once('=').is_some_and(|(k, _)| envfile::valid_key(k)), "fdt env set KEY=VALUE");
+    }
     let t = target(ctx, a.service.as_deref()).await?;
     let mut set = Vec::new();
     let mut argv_keys = Vec::new();
-    let single = a.from_db.is_some() || a.stdin || a.from_env.is_some() || a.from_file.is_some();
     if single {
         let [key] = a.assignments.as_slice() else {
             return Err(fail(Kind::Usage, "Con --from-db, --from-env, --from-file o --stdin se pasa una sola KEY."));
@@ -229,6 +274,13 @@ pub async fn set(ctx: &Ctx, a: SetArgs) -> Result<()> {
                     set.push((k.to_owned(), v.to_owned(), a.secret));
                     argv_keys.push(k.to_owned());
                 }
+                None if !envfile::valid_key(item) => {
+                    return Err(fail_hint(
+                        Kind::Usage,
+                        format!("«{item}» no es KEY=VALUE ni un nombre de variable. El servicio va con -s (o primero, si lleva guion)."),
+                        "fdt env set KEY=VALUE [KEY=VALUE…] -s <servicio>",
+                    ));
+                }
                 None if ctx.interactive => {
                     check_key(item)?;
                     let value = ui::secret(&format!("Valor de {item}"))?;
@@ -243,14 +295,16 @@ pub async fn set(ctx: &Ctx, a: SetArgs) -> Result<()> {
             }
         }
     }
-    apply(ctx, &t, &set, &[], false, a.dry_run, "env set", &argv_keys).await
+    apply(ctx, &t, &set, &[], false, a.dry_run, "env set", &argv_keys, a.wait).await
 }
 
-pub async fn unset(ctx: &Ctx, keys: Vec<String>, service: Option<String>, dry: bool) -> Result<()> {
+pub async fn unset(ctx: &Ctx, mut keys: Vec<String>, mut service: Option<String>, dry: bool, wait: Wait) -> Result<()> {
+    take_leading_service(&mut service, &mut keys, envfile::valid_key, "fdt env unset KEY");
     let t = target(ctx, service.as_deref()).await?;
-    apply(ctx, &t, &[], &keys, false, dry, "env unset", &[]).await
+    apply(ctx, &t, &[], &keys, false, dry, "env unset", &[], wait).await
 }
 
+#[allow(clippy::too_many_arguments)]
 pub async fn import(
     ctx: &Ctx,
     file: PathBuf,
@@ -259,6 +313,7 @@ pub async fn import(
     secret_keys: Vec<String>,
     replace: bool,
     dry: bool,
+    wait: Wait,
 ) -> Result<()> {
     let text = if file.as_os_str() == "-" {
         let mut raw = String::new();
@@ -276,7 +331,7 @@ pub async fn import(
         })
         .collect();
     let t = target(ctx, service.as_deref()).await?;
-    apply(ctx, &t, &set, &[], replace, dry, "env import", &[]).await
+    apply(ctx, &t, &set, &[], replace, dry, "env import", &[], wait).await
 }
 
 pub async fn pull(ctx: &Ctx, service: Option<String>, output: Option<PathBuf>) -> Result<()> {
@@ -309,5 +364,28 @@ pub async fn pull(ctx: &Ctx, service: Option<String>, output: Option<PathBuf>) -
             print!("{text}");
             Ok(())
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::leading_service;
+
+    fn words(w: &[&str]) -> Vec<String> {
+        w.iter().map(|s| (*s).to_owned()).collect()
+    }
+
+    #[test]
+    fn a_leading_slug_is_the_service_only_when_unambiguous() {
+        let kv = |w: &str| w.split_once('=').is_some_and(|(k, _)| crate::envfile::valid_key(k));
+        assert_eq!(leading_service(&None, &words(&["tienda-web-acme", "FOO=1"]), kv).as_deref(), Some("tienda-web-acme"));
+        // A valid variable name may be a KEY waiting for its value: not taken.
+        assert_eq!(leading_service(&None, &words(&["api", "FOO=1"]), kv), None);
+        // With -s there is nothing to guess.
+        assert_eq!(leading_service(&Some("x".into()), &words(&["tienda-web", "FOO=1"]), kv), None);
+        // Alone, or followed by something that is not KEY=VALUE: not taken.
+        assert_eq!(leading_service(&None, &words(&["tienda-web"]), kv), None);
+        assert_eq!(leading_service(&None, &words(&["tienda-web", "FOO"]), kv), None);
+        assert_eq!(leading_service(&None, &words(&["tienda-web", "FOO"]), crate::envfile::valid_key).as_deref(), Some("tienda-web"));
     }
 }

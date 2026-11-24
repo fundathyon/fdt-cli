@@ -152,8 +152,9 @@ servicio. Se eligen en este orden:
 
 1. Flags: `--org` (o `FDT_ORG`), `--project`, el servicio como argumento o
    `-s/--service`. `-s` funciona en todos los comandos de servicio; el
-   argumento, donde no se confunde con otro: no en `env set|unset|import`
-   (sus argumentos son variables o el archivo). En `deploys -s <svc> <id>`
+   argumento, donde no se confunde con otro: en `env set|unset` solo si no
+   puede ser una variable (`fdt env set tienda-web-acme FOO=1`: el slug lleva
+   guion), y nunca en `env import`. En `deploys -s <svc> <id>`
    el argumento es el deployment.
 2. `.fdt.toml` del repo (`fdt link`), buscado desde la carpeta actual hacia arriba.
 3. La organización activa (`fdt use`).
@@ -174,17 +175,17 @@ contexto sin llamar a la API; `fdt doctor` comprueba todo.
 | `fdt context` · `status` · `doctor` | Contexto local, resumen con servicios y bases, diagnóstico de la instalación |
 | `fdt org list\|show\|usage\|members` | Organizaciones, detalle, consumo frente al plan, miembros |
 | `fdt project list\|show\|create\|rename\|delete` | Proyectos (`rename` cambia nombre y/o `--description`) |
-| `fdt service list\|show\|create\|update\|delete` | Servicios de deploy |
+| `fdt service list\|show\|create\|update\|delete` | Servicios de deploy (un servicio pausado se avisa: su URL responde 502). `delete` avisa de lo que queda en el repo de GitHub (workflow y secreto) y cómo quitarlo |
 | `fdt service setup` | Solo lectura: workflow, Dockerfiles sugeridos, token vivo; `--write-workflow` lo escribe en el repo |
 | `fdt service install-workflow` | Instala workflow y secreto en GitHub (`--mode pull_request\|commit`, por defecto el modo del servicio, o `commit` si es `manual`; avisa si es otro; commit dispara un build: haz `git pull`) |
 | `fdt service rotate-registry-token` | Token `fdr_` nuevo; revoca el anterior. Exige `--confirm` y `--output` o `--reveal` |
-| `fdt service restart\|pause\|resume` | Reiniciar sin deployment; pausar (0 contenedores, `--confirm`); reanudar (`--wait`) |
+| `fdt service restart\|pause\|resume` | Reiniciar sin deployment (sin `--wait`: la API no dice cuándo vuelve); pausar (0 contenedores, `--confirm`); reanudar (`--wait`) |
 | `fdt service diagnose` | Por qué no despliega: checks del repo, workflow, imagen y deployment |
-| `fdt deploy <svc>` · `redeploy` | Lanza un deploy (`--rebuild` fuerza build); `--wait --timeout` sale con 7 si falla y 8 si se acaba el tiempo |
-| `fdt rollback <svc>` | Vuelve a una imagen anterior: `--tag`, `--digest sha256:<64 hex>` o `--to <deployment>`; `--wait` |
+| `fdt deploy <svc>` · `redeploy` | `deploy` despliega la cabeza de la rama (`--rebuild` fuerza build; si da la misma imagen que corre, termina con 0 y `unchanged: true`); `redeploy` repite la imagen que corre ahora (tras un rollback, la del rollback). `--wait --timeout` sale con 7 si falla (con los comandos para ver por qué) y 8 si se acaba el tiempo |
+| `fdt rollback <svc>` | Vuelve a una imagen anterior: `--tag`, `--digest sha256:<64 hex>` o `--to <deployment>` (live o superseded); `--wait` |
 | `fdt deploys <svc> [<id>] [--job N]` | Historial, detalle con el build, log de un job. `<id>`: cualquier prefijo que no sea ambiguo |
 | `fdt logs <svc>` | Últimas líneas (`--tail`, `--since`, `--until`: duración o fecha RFC 3339) |
-| `fdt env list\|set\|unset\|import\|pull` | Variables; los secretos salen enmascarados. `list` sin variables lo dice; `unset` avisa de las que no existen |
+| `fdt env list\|set\|unset\|import\|pull` | Variables; los secretos salen enmascarados. `list` sin variables lo dice; `unset` avisa de las que no existen; `set\|unset\|import --wait` espera al reinicio |
 | `fdt db list\|show\|create\|delete` | Bases Postgres y MongoDB (`--engine` se comprueba contra los motores que ofrece la organización) |
 | `fdt db url --reveal` · `credentials [--reveal]` | Contraseña y cadenas: solo con `--reveal` (`url` sin él sale con 2) |
 | `fdt db set-credentials` | Cambia usuario/contraseña de Postgres (`--password-stdin\|--password-from-env`, `--confirm`) |
@@ -270,7 +271,8 @@ Reglas que `fdt` cumple para que un agente lo use sin supervisión:
   pausado. `deploy --dry-run` trae `prediction` (workflow o redeploy, cuando
   se puede saber sin lanzar).
 - **Esperar es explícito**: `--wait --timeout` en `deploy`, `redeploy`,
-  `rollback`, `service resume` y `db create`; si se acaba el tiempo sale con 8.
+  `rollback`, `service resume`, `env set|unset|import` y `db create`; si se
+  acaba el tiempo sale con 8.
   Esperar es por consulta periódica (el gateway corta cada petición a los
   30 s). Core no devuelve el id del run al lanzar el workflow: si aparecen
   varios deployments a la vez, la salida lo marca con `ambiguous: true`.

@@ -64,6 +64,20 @@ pub async fn link(ctx: &Ctx, project: Option<String>, service: Option<String>) -
         Some(q) => Some(resolve::service(&api, &org.id, &q).await?),
         None => None,
     };
+    // A service of another project would leave .fdt.toml pointing at two
+    // things that do not go together.
+    if let (Some(p), Some(v)) = (&project, &service) {
+        let apps = resolve::project_apps(&api, &org.id, &resolve::id(p)).await?;
+        let app = v["app_id"].as_str().unwrap_or_default();
+        if !apps.iter().any(|a| resolve::id(a) == app) {
+            return Err(Failure::new(
+                Kind::Usage,
+                format!("El servicio «{}» no es del proyecto «{}»: no se escribió .fdt.toml.", s(v, "slug"), s(p, "name")),
+            )
+            .hint(format!("fdt service list -p {} (o fdt service create … -p {} para crear uno ahí)", s(p, "name"), s(p, "name")))
+            .into());
+        }
+    }
     let link = Link {
         org: Some(org.id.clone()),
         org_name: Some(org.name.clone()),
@@ -295,16 +309,26 @@ pub async fn api(
     let path = fill(ctx, &api, &path).await?;
     let path = if path.starts_with('/') { path } else { format!("/{path}") };
     let answer = api.raw(method, &path, &query, body.as_ref()).await?;
+    // An error never reaches stdout: a script reading it would take the error
+    // for data. The body goes inside the error (details.body), as text if it
+    // is not JSON.
+    if !(200..300).contains(&answer.status) || answer.body["success"] == json!(false) {
+        let mut failure = api_error(answer.status, &answer.body);
+        let mut details = match failure.details.take() {
+            Some(Value::Object(map)) => map,
+            _ => serde_json::Map::new(),
+        };
+        details.insert("body".into(), answer.body.clone());
+        details.insert("path".into(), json!(path));
+        failure.details = Some(Value::Object(details));
+        return Err(failure.into());
+    }
     match &answer.body {
         Value::Null => {}
         Value::String(text) => println!("{text}"),
         other => crate::output::print_json(other)?,
     }
-    if (200..300).contains(&answer.status) {
-        Ok(())
-    } else {
-        Err(api_error(answer.status, &answer.body).into())
-    }
+    Ok(())
 }
 
 pub async fn update(ctx: &Ctx, check: bool) -> Result<()> {

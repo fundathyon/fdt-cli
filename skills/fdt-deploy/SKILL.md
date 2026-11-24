@@ -31,23 +31,43 @@ Sin Dockerfile, créalo en el paso 3 con la plantilla recomendada.
 
 ```sh
 fdt project create tienda --if-not-exists --json
-fdt service create api --project tienda --repo acme/tienda-api \
-  --port 3000 --memory 512 --health-path /health --if-not-exists --dry-run --json   # revisa
-fdt service create api --project tienda --repo acme/tienda-api \
-  --port 3000 --memory 512 --health-path /health --if-not-exists --json
-fdt link --project tienda --service api      # .fdt.toml; lo demás ya no necesita flags
+fdt service create tienda-web --project tienda --repo acme/tienda-web \
+  --health-path /health --workflow-mode manual --if-not-exists --dry-run --json   # revisa url y service_memory_mb_options
+fdt service create tienda-web --project tienda --repo acme/tienda-web \
+  --health-path /health --workflow-mode manual --if-not-exists --json
+fdt link --project tienda -s tienda-web      # .fdt.toml; lo demás ya no necesita flags
 ```
 
-- `api` es el slug (3-32, `a-z0-9-`). La URL la decide Core (`--dry-run` la anticipa por stderr); léela de `data.url`.
-- `--memory` en MB (256, 512 o 1024 según plan; `--size` es alias). El puerto debe ser el que escucha el contenedor.
-- Monorepo: `--dockerfile <ruta>` y `--build-context <carpeta>`. Rama: `--branch` (por defecto `main`).
+- Crea el servicio como el panel (`POST …/apps/{app}/deploy/configure`). El
+  argumento es la **primera parte del subdominio**: Core le añade el sufijo de
+  la organización (`tienda-web` → slug `tienda-web-acme`). `--dry-run` trae la
+  URL exacta en `data.url` (`url_certain: true`); sin argumento Core genera
+  `<repo>-<8 al azar>` y no se sabe hasta crear. Lee siempre `data.url` y
+  `data.slug` de la respuesta.
+- Al servicio se le llama luego por su **nombre** (el de la app: el nombre del
+  repo, `tienda-web`; cámbialo con `--name`) o por su **slug** (`tienda-web-acme`).
+- Subdominio: `a-z0-9-`, sin guion en los extremos (exit 2 `deploy.subdomain_invalid`
+  antes de llamar a la API). No uses `api` como nombre de ejemplo: es un subdominio reservado.
+- Por defecto: `--port 3000`, `--memory 256` (alias `--size`; 256 es el máximo
+  de Free y Starter), la rama por defecto del repo. Si `--memory` no cabe en el
+  plan sale con 6 `quota.deploy.service_memory` sin enviar nada. El puerto
+  debe ser el que escucha el contenedor.
+- `--workflow-mode`: `pull_request` (por defecto: Core abre un PR con el
+  workflow y guarda el secreto del registry), `commit` (commit directo en la
+  rama: dispara el build ya) o `manual` (no toca GitHub; instalas el workflow
+  en el paso 3, después del Dockerfile). Con el Dockerfile aún sin subir, usa
+  `manual`, como arriba. `data.workflow.status` dice qué pasó.
+- `--no-auto-deploy`: el workflow no corre en cada push a la rama; solo con `fdt deploy`.
+- Monorepo: `--dockerfile <ruta>` y `--build-context <carpeta>`.
+- Una app tiene un solo servicio: si ya existe, `create` sale con 1
+  (`fdt.service_exists`); con `--if-not-exists` lo devuelve (`created: false`).
 - Estado inicial: `awaiting_first_deploy`.
 - exit 6 `quota.deploy.services|service_memory|memory`: para e informa (ver `fdt-basics`).
 
 ## 3. Dockerfile y workflow
 
 ```sh
-fdt service setup api --json
+fdt service setup tienda-web --json
 ```
 
 Lee `data.setup.recommended_dockerfile` (`template_id`, `warnings`) y el
@@ -62,32 +82,33 @@ build fallará. Pide permiso a la persona para el commit/push si no lo pidió.
 `fdt service setup` solo lee. Instalar es otro comando:
 
 ```sh
-fdt service install-workflow api --mode pull_request --dry-run --json   # revisa
-fdt service install-workflow api --mode pull_request --json   # por defecto: abre un PR
-fdt service install-workflow api --mode commit --json         # commit directo a la rama
+fdt service install-workflow tienda-web --mode pull_request --dry-run --json   # revisa
+fdt service install-workflow tienda-web --mode pull_request --json   # abre un PR
+fdt service install-workflow tienda-web --mode commit --json         # commit directo a la rama
 ```
 
-Salida: `data.workflow.status` = `committed` o `pull_request_open` (con
+Sin `--mode` usa el modo del servicio (o `pull_request` si es `manual`), y
+avisa por stderr si pasas otro. Salida: `data.workflow.status` = `committed` o `pull_request_open` (con
 `data.workflow.pull_request_url`: la persona debe fusionarlo). Con `--mode
 commit` el push dispara un build y tu copia local queda atrás: **haz `git pull`**
 (fdt lo avisa por stderr). Si GitHub lo rechaza (exit 1, `error.details.workflow.error`:
 `branch_protected`, `permission_missing`…), usa `--mode pull_request` o
-`fdt service setup api --write-workflow` (escribe `.github/workflows/foundathyon.yml`
+`fdt service setup tienda-web --write-workflow` (escribe `.github/workflows/foundathyon.yml`
 local; luego commit y push) y pide la secret `FOUNDATHYON_REGISTRY_TOKEN` a la persona.
 
 No rotes el token del registry salvo que `diagnose` diga `registry_token`:
-`fdt service rotate-registry-token api --confirm api --output <archivo>` revoca
+`fdt service rotate-registry-token tienda-web --confirm tienda-web --output <archivo>` revoca
 el anterior y rompe el workflow hasta actualizar el secreto (o reinstalar el workflow).
 
 ## 4. Variables y secretos
 
 ```sh
-fdt env set NODE_ENV=production LOG_LEVEL=info --service api
-fdt env set STRIPE_KEY --secret --stdin --service api < ruta/al/archivo   # tú no lo lees
-fdt env set STRIPE_KEY --secret --from-env STRIPE_KEY --service api      # de una variable de entorno local
-fdt env set STRIPE_KEY --secret --from-file ruta/al/archivo --service api
-fdt env import .env.production --service api --secret-key STRIPE_KEY --dry-run   # luego sin --dry-run
-fdt env list --service api --json     # secretos enmascarados
+fdt env set NODE_ENV=production LOG_LEVEL=info -s tienda-web
+fdt env set STRIPE_KEY --secret --stdin -s tienda-web < ruta/al/archivo   # tú no lo lees
+fdt env set STRIPE_KEY --secret --from-env STRIPE_KEY -s tienda-web      # de una variable de entorno local
+fdt env set STRIPE_KEY --secret --from-file ruta/al/archivo -s tienda-web
+fdt env import .env.production -s tienda-web --secret-key STRIPE_KEY --dry-run   # luego sin --dry-run
+fdt env list -s tienda-web --json     # secretos enmascarados
 ```
 
 - Valores no secretos pueden ir en `KEY=VALUE`. **Un secreto nunca en la línea de comandos** (`KEY=VALUE --secret`, `service create --secret K=V`): queda en el historial y en tu contexto, y fdt lo avisa. Usa `--stdin`, `--from-env` o `--from-file` (en `service create`: `--secret-from-env KEY[=VAR]` / `--secret-from-file KEY=RUTA`), o pide a la persona que ejecute `fdt env set KEY --secret` en su terminal (pregunta sin eco).
@@ -97,18 +118,18 @@ fdt env list --service api --json     # secretos enmascarados
 ## 5. Deploy y verificación
 
 ```sh
-fdt deploy api --dry-run --json
-fdt deploy api --wait --timeout 15m --json
+fdt deploy tienda-web --dry-run --json
+fdt deploy tienda-web --wait --timeout 15m --json
 ```
 
 - `--dry-run` trae `data.prediction`: `would` = `workflow` (sin imagen o con `--rebuild`) o `redeploy_or_workflow` (Core decide según la cabeza de la rama; `certain: false`).
 - Sin imagen aún, `deploy` lanza el workflow (`data.dispatched: true`, `reason: no_image|new_commits`) y `--wait` espera a que llegue la imagen y se despliegue. `--rebuild` fuerza un build nuevo.
-- Si con `--wait` aparecen varios deployments a la vez (otro deploy en paralelo), la salida trae `ambiguous: true` y `candidates`: confirma con `fdt deploys api --json` cuál es el tuyo.
-- Éxito: exit 0, `data.deployment.status` = `live`. `superseded` = otro deploy más nuevo lo reemplazó; revisa `fdt deploys api --json`.
+- Si con `--wait` aparecen varios deployments a la vez (otro deploy en paralelo), la salida trae `ambiguous: true` y `candidates`: confirma con `fdt deploys tienda-web --json` cuál es el tuyo.
+- Éxito: exit 0, `data.deployment.status` = `live`. `superseded` = otro deploy más nuevo lo reemplazó; revisa `fdt deploys tienda-web --json`.
 - Exit 7 (falló) u 8 (`timeout`, sigue en curso): `fdt-troubleshoot`.
-- Verifica: `fdt status --json`, `fdt logs api --since 5m --json` y, si hay `health_path`, un GET a `data.url` con curl.
+- Verifica: `fdt status --json`, `fdt logs tienda-web --since 5m --json` y, si hay `health_path`, un GET a `data.url` con curl.
 
-Redeploy sin build: `fdt redeploy api --wait --json`. Volver a una imagen anterior: `fdt rollback api --to <deployment> --wait --json` (o `--tag`, `--digest`; pide admin).
+Redeploy sin build: `fdt redeploy tienda-web --wait --json`. Volver a una imagen anterior: `fdt rollback tienda-web --to <deployment> --wait --json` (o `--tag`, `--digest`; pide admin).
 
 ## 6. Opcional: login en la app
 

@@ -164,6 +164,12 @@ fn install(dir: &Path, name: &str, files: &BTreeMap<String, Vec<u8>>, source: &s
     Ok(())
 }
 
+fn remove_if_empty(dir: &Path) {
+    if std::fs::read_dir(dir).is_ok_and(|mut d| d.next().is_none()) {
+        let _ = std::fs::remove_dir(dir);
+    }
+}
+
 pub fn run(ctx: &Ctx, action: Action, options: Options) -> Result<()> {
     let (catalog, source) = match &options.from {
         Some(from) => (local_catalog(from)?, from.display().to_string()),
@@ -242,10 +248,34 @@ pub fn run(ctx: &Ctx, action: Action, options: Options) -> Result<()> {
             ("actualizadas", done)
         }
         Action::Remove(requested) => {
+            // `all` is every skill fdt installed here (its marker), also ones
+            // no longer in the catalog. A name that is neither in the catalog
+            // nor installed is an error (exit 5), not a silent no-op.
+            let fdt_installed = |name: &str| dirs.iter().any(|d| read_marker(&d.join(name)).is_some());
+            let names: Vec<String> = if requested.iter().any(|r| r == "all") {
+                let mut all: Vec<String> = dirs
+                    .iter()
+                    .filter_map(|d| std::fs::read_dir(d).ok())
+                    .flatten()
+                    .flatten()
+                    .filter(|e| read_marker(&e.path()).is_some())
+                    .map(|e| e.file_name().to_string_lossy().into_owned())
+                    .collect();
+                all.sort();
+                all.dedup();
+                all
+            } else {
+                for r in &requested {
+                    if !catalog.contains_key(r) && !fdt_installed(r) && installed(r).is_empty() {
+                        return Err(crate::failure::Failure::new(Kind::NotFound, format!("No hay ninguna skill «{r}».")).hint("fdt skills list").into());
+                    }
+                }
+                requested.clone()
+            };
             let mut done = Vec::new();
-            for name in requested {
+            for name in &names {
                 for dir in &dirs {
-                    let target = dir.join(&name);
+                    let target = dir.join(name);
                     if target.exists() {
                         if read_marker(&target).is_none() {
                             return Err(fail(Kind::Error, format!("{} no lo instaló fdt: no se borra.", target.display())));
@@ -253,6 +283,23 @@ pub fn run(ctx: &Ctx, action: Action, options: Options) -> Result<()> {
                         std::fs::remove_dir_all(&target)?;
                         done.push(json!({"skill": name, "path": target}));
                     }
+                }
+            }
+            if done.is_empty() && !requested.iter().any(|r| r == "all") {
+                return Err(crate::failure::Failure::new(
+                    Kind::NotFound,
+                    format!("{} no está instalada en {}.", names.join(", "), dirs.iter().map(|d| d.display().to_string()).collect::<Vec<_>>().join(" ni en ")),
+                )
+                .hint("fdt skills list (y -g para las de tu usuario)")
+                .into());
+            }
+            // No empty .claude/skills or .agents/skills (nor their parent) left behind.
+            for dir in &dirs {
+                remove_if_empty(dir);
+                if let Some(parent) = dir.parent()
+                    && parent != base
+                {
+                    remove_if_empty(parent);
                 }
             }
             ("quitadas", done)

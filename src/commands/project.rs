@@ -2,6 +2,7 @@
 
 use crate::api::enc;
 use crate::context::{Ctx, dry_run};
+use crate::failure::{Failure, Kind};
 use crate::output::{fields, s, when};
 use crate::{resolve, ui};
 use anyhow::Result;
@@ -42,7 +43,7 @@ pub async fn show(ctx: &Ctx, query: Option<String>) -> Result<()> {
             ("proyecto", s(&project, "name")),
             ("id", pid.clone()),
             ("descripción", s(&project, "description")),
-            ("servicios", names("services", "alias")),
+            ("servicios", services(&project)),
             ("apps", names("apps", "name")),
             ("bases", names("databases", "name")),
             ("creado", when(&project, "created_at")),
@@ -50,13 +51,47 @@ pub async fn show(ctx: &Ctx, query: Option<String>) -> Result<()> {
     })
 }
 
+/// The project's services as Core lists them: `{type, …}` entries, with a
+/// name or alias when there is one.
+fn services(project: &Value) -> String {
+    let items: Vec<String> = project["services"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .map(|x| {
+            ["alias", "name", "slug", "type"]
+                .iter()
+                .find_map(|k| x[*k].as_str().filter(|v| !v.is_empty()))
+                .map_or_else(|| x.as_str().unwrap_or("?").to_owned(), str::to_owned)
+        })
+        .collect();
+    if items.is_empty() { "-".into() } else { items.join(", ") }
+}
+
 pub async fn create(ctx: &Ctx, name: String, description: Option<String>, if_not_exists: bool, dry: bool) -> Result<()> {
     let (api, org) = super::org_api(ctx).await?;
     if if_not_exists {
         let existing = resolve::projects(&api, &org.id).await?;
-        if let Some(p) = existing.iter().find(|p| p["name"].as_str().is_some_and(|n| n.eq_ignore_ascii_case(name.trim()))) {
-            ui::info(&format!("El proyecto «{}» ya existía.", s(p, "name")));
-            return ctx.out.print(p, || format!("{} ({})", s(p, "name"), s(p, "id")));
+        let same: Vec<&Value> = existing
+            .iter()
+            .filter(|p| p["name"].as_str().is_some_and(|n| n.trim().eq_ignore_ascii_case(name.trim())))
+            .collect();
+        match same.as_slice() {
+            [] => {}
+            [p] => {
+                ui::info(&format!("El proyecto «{}» ya existía.", s(p, "name")));
+                return ctx.out.print(p, || format!("{} ({})", s(p, "name"), s(p, "id")));
+            }
+            several => {
+                let candidates: Vec<String> = several.iter().map(|p| format!("{} ({})", s(p, "name"), s(p, "id"))).collect();
+                return Err(Failure::new(
+                    Kind::Ambiguous,
+                    format!("Hay {} proyectos llamados «{}»: --if-not-exists no sabe cuál devolver.", several.len(), name.trim()),
+                )
+                .details(json!({"candidates": candidates}))
+                .hint("usa el id del que quieras (fdt project show <id>), o renombra uno: fdt project rename <id> <nombre>")
+                .into());
+            }
         }
     }
     let mut body = json!({"name": name.trim()});
@@ -102,11 +137,22 @@ pub async fn delete(ctx: &Ctx, query: String, confirm: Option<String>, dry: bool
     let project = resolve::project(&api, &org.id, &query).await?;
     let name = s(&project, "name");
     let path = format!("/organizations/{}/projects/{}", enc(&org.id), enc(&resolve::id(&project)));
+    // Also in a dry run: it would pass where the real one is refused otherwise.
+    ctx.confirm(&name, confirm.as_deref(), "borrar el proyecto")?;
     if dry {
         return dry_run(ctx, "project delete", "DELETE", &path, None);
     }
-    ctx.confirm(&name, confirm.as_deref(), "borrar el proyecto")?;
     api.delete(&path).await?;
     ui::success(&format!("Proyecto «{name}» borrado."));
     ctx.out.print(&json!({"ok": true, "deleted": resolve::id(&project), "name": name}), String::new)
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn show_names_the_services_by_the_field_core_sends() {
+        let p = serde_json::json!({"services": [{"type": "deploy"}, {"type": "accounts", "alias": "Login"}]});
+        assert_eq!(super::services(&p), "deploy, Login");
+        assert_eq!(super::services(&serde_json::json!({"services": []})), "-");
+    }
 }

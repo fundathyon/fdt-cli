@@ -60,6 +60,32 @@ pub struct Wait {
     pub timeout: std::time::Duration,
 }
 
+/// The service a command works on: as an argument or with -s/--service
+/// (the same thing), or the one in .fdt.toml.
+#[derive(Args, Clone, Default)]
+pub struct Svc {
+    /// Servicio (slug, nombre o id); por defecto el de .fdt.toml. Lo mismo que -s.
+    #[arg(value_name = "SERVICIO")]
+    pub service: Option<String>,
+    /// Servicio (slug, nombre o id); lo mismo que el argumento.
+    #[arg(long = "service", short = 's', value_name = "SERVICIO", conflicts_with = "service")]
+    pub service_flag: Option<String>,
+}
+
+impl Svc {
+    pub fn get(self) -> Option<String> {
+        self.service.or(self.service_flag)
+    }
+}
+
+/// The -s/--service flag alone, for commands whose arguments are something else.
+#[derive(Args, Clone, Default)]
+pub struct SvcFlag {
+    /// Servicio (slug, nombre o id); por defecto el de .fdt.toml.
+    #[arg(long = "service", short = 's', value_name = "SERVICIO")]
+    pub service: Option<String>,
+}
+
 #[derive(Subcommand)]
 pub enum Command {
     // ------------------------------------------------------------ sesión
@@ -92,7 +118,8 @@ pub enum Command {
         /// Nombre o id; sin él se pregunta (en una terminal).
         org: Option<String>,
     },
-    /// Ata este repo a una organización, proyecto y servicio (escribe .fdt.toml).
+    /// Ata este repo a una organización, proyecto y servicio (escribe .fdt.toml). Con -p y -s, el
+    /// servicio tiene que ser de ese proyecto.
     Link {
         /// Proyecto (nombre o id).
         #[arg(long, short = 'p')]
@@ -131,10 +158,10 @@ pub enum Command {
         command: Box<ServiceCommand>,
     },
     /// Lanza un deploy: redespliega la imagen de la rama si ya existe, o lanza el workflow de GitHub Actions.
-    #[command(after_help = "Ejemplos:\n  fdt deploy api --wait --json\n  fdt deploy --wait --timeout 20m   # el servicio de .fdt.toml")]
+    #[command(after_help = "Ejemplos:\n  fdt deploy tienda-web --wait --json\n  fdt deploy -s tienda-web --rebuild\n  fdt deploy --wait --timeout 20m   # el servicio de .fdt.toml")]
     Deploy {
-        /// Servicio (slug, nombre o id); por defecto el de .fdt.toml.
-        service: Option<String>,
+        #[command(flatten)]
+        service: Svc,
         /// Siempre lanza el workflow (build nuevo), sin reutilizar la imagen; saca de la pausa.
         #[arg(long)]
         rebuild: bool,
@@ -146,23 +173,25 @@ pub enum Command {
     },
     /// Redespliega la imagen actual (o la última que llegó) sin build.
     Redeploy {
-        service: Option<String>,
+        #[command(flatten)]
+        service: Svc,
         #[command(flatten)]
         wait: Wait,
         #[arg(long)]
         dry_run: bool,
     },
     /// Vuelve a una imagen anterior del servicio, por tag, digest o deployment.
-    #[command(after_help = "Ejemplos:\n  fdt rollback api --tag v1.3.0 --wait\n  fdt rollback api --to 3f2a9c1d      # la imagen de ese deployment (fdt deploys api)\n  fdt rollback api --digest sha256:<64 hex> --dry-run")]
+    #[command(after_help = "Ejemplos:\n  fdt rollback tienda-web --tag v1.3.0 --wait\n  fdt rollback tienda-web --to 3f2a      # la imagen de ese deployment (fdt deploys tienda-web)\n  fdt rollback tienda-web --digest sha256:<64 hex> --dry-run")]
     Rollback {
-        service: Option<String>,
+        #[command(flatten)]
+        service: Svc,
         /// Tag de la imagen en el registry.
         #[arg(long, conflicts_with_all = ["digest", "to"])]
         tag: Option<String>,
         /// Digest de la imagen (sha256:<64 hex>).
         #[arg(long, conflicts_with = "to")]
         digest: Option<String>,
-        /// Id (o prefijo) de un deployment anterior: se usa su digest.
+        /// Id de un deployment anterior, o cualquier prefijo que no sea ambiguo: se usa su digest.
         #[arg(long, value_name = "DEPLOYMENT")]
         to: Option<String>,
         #[command(flatten)]
@@ -171,24 +200,31 @@ pub enum Command {
         dry_run: bool,
     },
     /// Historial de deploys de un servicio, o el detalle de uno (con --job, el log de ese job del build).
+    #[command(after_help = "Ejemplos:\n  fdt deploys tienda-web\n  fdt deploys tienda-web 3f2a          # cualquier prefijo del id que no sea ambiguo\n  fdt deploys -s tienda-web 3f2a --job 42   # con -s, el único argumento es el deployment")]
     Deploys {
-        /// Servicio; por defecto el de .fdt.toml.
+        /// Servicio (slug, nombre o id); por defecto el de .fdt.toml. Con -s, este argumento es el deployment.
+        #[arg(value_name = "SERVICIO")]
         service: Option<String>,
-        /// Id del deployment (o sus primeros caracteres).
+        /// Id del deployment, o cualquier prefijo que no sea ambiguo.
         deployment: Option<String>,
+        /// Servicio (slug, nombre o id); lo mismo que el primer argumento.
+        #[arg(long = "service", short = 's', value_name = "SERVICIO")]
+        service_flag: Option<String>,
         /// Cuántos mostrar (máximo 50, lo que guarda la API).
         #[arg(short = 'n', long, default_value_t = 20)]
         limit: usize,
         /// Con un deployment: id del job de GitHub Actions cuyo log mostrar.
-        #[arg(long, requires = "deployment", value_name = "JOB_ID")]
+        #[arg(long, value_name = "JOB_ID")]
         job: Option<i64>,
         /// Con --job: líneas del log (1-5000).
         #[arg(long, requires = "job", default_value_t = 1000)]
         tail: u32,
     },
     /// Logs de ejecución de un servicio (las últimas líneas; sin seguimiento en vivo).
+    #[command(after_help = "Ejemplos:\n  fdt logs tienda-web --since 10m\n  fdt logs -s tienda-web --tail 50")]
     Logs {
-        service: Option<String>,
+        #[command(flatten)]
+        service: Svc,
         /// Líneas (1-1000).
         #[arg(long, default_value_t = 200)]
         tail: u32,
@@ -210,7 +246,7 @@ pub enum Command {
         command: DbCommand,
     },
     /// Llamada cruda y autenticada a la API, como `gh api`. {org}, {project} y {service} se reemplazan por el contexto.
-    #[command(after_help = "Ejemplos:\n  fdt api GET /organizations/{org}/apps\n  fdt api PATCH /organizations/{org}/deploy/services/{service} --data '{\"name\":\"API\"}'\n  fdt api POST /organizations/{org}/projects --input body.json")]
+    #[command(after_help = "Con un error HTTP stdout queda vacío: el error va por stderr (en JSON con --json o sin terminal), con el cuerpo de la respuesta en error.details.body.\n\nEjemplos:\n  fdt api GET /organizations/{org}/apps\n  fdt api PATCH /organizations/{org}/deploy/services/{service} --data '{\"name\":\"API\"}'\n  fdt api POST /organizations/{org}/projects --input body.json")]
     Api {
         /// GET, POST, PUT, PATCH o DELETE.
         method: String,
@@ -278,9 +314,13 @@ pub enum TokenCommand {
     },
     /// Tus tokens (sin secreto).
     List,
-    /// Revoca un token (por id o nombre).
+    /// Revoca un token (por id o nombre). Una sesión (sobre todo la actual) exige --confirm: cierra
+    /// esa sesión y revoca en cascada los tokens creados con ella.
     Revoke {
         token: String,
+        /// Con una sesión: su nombre exacto (o su id si no tiene nombre).
+        #[arg(long, value_name = "NOMBRE")]
+        confirm: Option<String>,
         #[arg(long)]
         dry_run: bool,
     },
@@ -309,7 +349,7 @@ pub enum ProjectCommand {
         name: String,
         #[arg(long)]
         description: Option<String>,
-        /// Si ya existe uno con ese nombre, lo devuelve en vez de fallar.
+        /// Si ya existe uno con ese nombre, lo devuelve en vez de fallar (si hay varios, sale con 2 y los lista).
         #[arg(long)]
         if_not_exists: bool,
         #[arg(long)]
@@ -326,7 +366,7 @@ pub enum ProjectCommand {
         #[arg(long)]
         dry_run: bool,
     },
-    /// Borra un proyecto (debe estar sin servicios). Exige --confirm <nombre exacto>.
+    /// Borra un proyecto (debe estar sin servicios). Exige --confirm <nombre exacto>, también con --dry-run.
     Delete {
         project: String,
         #[arg(long, value_name = "NOMBRE")]
@@ -338,8 +378,10 @@ pub enum ProjectCommand {
 
 #[derive(Args)]
 pub struct ServiceCreate {
-    /// Subdominio y slug del servicio (3-32 caracteres a-z, 0-9, -): https://<slug>.<dominio>.
-    pub slug: String,
+    /// Primera parte del subdominio: la URL queda https://<subdominio>-<sufijo de la org>.<dominio>
+    /// (--dry-run la muestra). Sin él, Core lo genera a partir del repo (<repo>-<8 caracteres>).
+    #[arg(value_name = "SUBDOMINIO")]
+    pub subdomain: Option<String>,
     /// Repo de GitHub (owner/nombre) de la app a desplegar.
     #[arg(long, conflicts_with = "app")]
     pub repo: Option<String>,
@@ -349,33 +391,35 @@ pub struct ServiceCreate {
     /// Pone la app en este proyecto (idempotente).
     #[arg(long, short = 'p')]
     pub project: Option<String>,
-    /// Nombre visible (por defecto el slug).
+    /// Nombre visible (por defecto el de la app).
     #[arg(long)]
     pub name: Option<String>,
-    /// Rama que dispara el deploy.
-    #[arg(long, default_value = "main")]
-    pub branch: String,
+    /// Rama que se despliega (por defecto la rama por defecto del repo).
+    #[arg(long)]
+    pub branch: Option<String>,
     /// Puerto en el que escucha el contenedor.
-    #[arg(long, default_value_t = 8080)]
+    #[arg(long, default_value_t = 3000)]
     pub port: u16,
-    /// Memoria en MB (256, 512 o 1024, según el plan).
-    #[arg(long, alias = "size", default_value_t = 512)]
+    /// Memoria en MB: 256, 512 o 1024, lo que deje el plan (Free y Starter, 256). Alias: --size.
+    #[arg(long, visible_alias = "size", default_value_t = 256)]
     pub memory: u32,
     /// Ruta del healthcheck (p. ej. /health).
     #[arg(long)]
     pub health_path: Option<String>,
-    /// Dockerfile dentro del repo.
+    /// Dockerfile, relativo a --build-context (por defecto Dockerfile).
     #[arg(long)]
     pub dockerfile: Option<String>,
-    /// Carpeta de contexto del build.
+    /// Carpeta de contexto del build (por defecto .).
     #[arg(long)]
     pub build_context: Option<String>,
-    /// No desplegar solo al llegar una imagen nueva.
+    /// El workflow no corre en cada push a la rama: solo despliega con fdt deploy (auto_deploy=false).
     #[arg(long)]
     pub no_auto_deploy: bool,
-    /// Cómo instalar el workflow: manual (por defecto), commit o pull_request.
-    #[arg(long, value_parser = ["manual", "commit", "pull_request"])]
-    pub workflow_mode: Option<String>,
+    /// Cómo instala Core el workflow y el secreto del registry en el repo: pull_request (por defecto: abre
+    /// un PR; el primer build llega al fusionarlo), commit (commit directo en la rama, como el panel) o manual
+    /// (no toca GitHub; luego fdt service install-workflow).
+    #[arg(long, value_parser = ["pull_request", "commit", "manual"], default_value = "pull_request")]
+    pub workflow_mode: String,
     /// Variable inicial KEY=VALUE (se puede repetir).
     #[arg(long = "env", short = 'e', value_name = "KEY=VALUE")]
     pub env: Vec<String>,
@@ -388,7 +432,8 @@ pub struct ServiceCreate {
     /// Secreto inicial leído de un archivo: KEY=RUTA (se puede repetir).
     #[arg(long = "secret-from-file", value_name = "KEY=RUTA")]
     pub secrets_from_file: Vec<String>,
-    /// Si ya existe un servicio con ese slug, lo devuelve en vez de fallar.
+    /// Si la app ya tiene servicio, lo devuelve en vez de fallar (lo reconoce por la app/repo, aunque Core
+    /// le haya puesto sufijo al subdominio).
     #[arg(long)]
     pub if_not_exists: bool,
     #[arg(long)]
@@ -397,14 +442,19 @@ pub struct ServiceCreate {
 
 #[derive(Args)]
 pub struct ServiceUpdate {
-    pub service: Option<String>,
+    #[command(flatten)]
+    pub service: Svc,
+    /// Nombre visible.
     #[arg(long)]
     pub name: Option<String>,
+    /// Rama que se despliega (no reescribe el workflow: fdt service install-workflow).
     #[arg(long)]
     pub branch: Option<String>,
+    /// Puerto del contenedor.
     #[arg(long)]
     pub port: Option<u16>,
-    #[arg(long, alias = "size")]
+    /// Memoria en MB (256, 512 o 1024, lo que deje el plan). Alias: --size.
+    #[arg(long, visible_alias = "size")]
     pub memory: Option<u32>,
     /// Ruta del healthcheck; "" lo quita.
     #[arg(long)]
@@ -413,7 +463,7 @@ pub struct ServiceUpdate {
     pub dockerfile: Option<String>,
     #[arg(long)]
     pub build_context: Option<String>,
-    /// true o false.
+    /// true: el workflow corre en cada push a la rama; false: solo con fdt deploy.
     #[arg(long, value_name = "BOOL")]
     pub auto_deploy: Option<bool>,
     #[arg(long, value_parser = ["manual", "commit", "pull_request"])]
@@ -430,15 +480,20 @@ pub enum ServiceCommand {
         project: Option<String>,
     },
     /// Un servicio.
-    Show { service: Option<String> },
-    /// Crea un servicio para el repo de una app.
-    #[command(after_help = "Ejemplo:\n  fdt service create api --project tienda --repo acme/tienda-api --size 512 --port 3000 --if-not-exists --json")]
+    Show {
+        #[command(flatten)]
+        service: Svc,
+    },
+    /// Crea el servicio de deploy de una app, como el panel: subdominio con el sufijo de la organización,
+    /// imagen con el nombre del repo, y el workflow con el secreto del registry instalados en el repo.
+    #[command(after_help = "Ejemplos:\n  fdt service create tienda-web --repo acme/tienda-web --project tienda --if-not-exists --json\n  fdt service create tienda-web --repo acme/tienda-web --port 8080 --memory 512 --workflow-mode commit\n  fdt service create --repo acme/tienda-web --dry-run     # Core elige el subdominio\n\nPor defecto: puerto 3000, memoria 256 MB (el máximo de Free y Starter), la rama por defecto del repo y\n--workflow-mode pull_request. Una app tiene un solo servicio: si ya lo tiene, falla (o lo devuelve con --if-not-exists).")]
     Create(ServiceCreate),
     /// Cambia ajustes (nombre, rama, puerto, memoria, healthcheck, build).
     Update(ServiceUpdate),
-    /// Borra un servicio. Exige --confirm <slug exacto>.
+    /// Borra un servicio. Exige --confirm <slug exacto>, también con --dry-run.
     Delete {
-        service: String,
+        #[command(flatten)]
+        service: Svc,
         #[arg(long, value_name = "SLUG")]
         confirm: Option<String>,
         #[arg(long)]
@@ -446,24 +501,28 @@ pub enum ServiceCommand {
     },
     /// Solo lectura: workflow de GitHub Actions, Dockerfiles sugeridos y estado del token del registry.
     Setup {
-        service: Option<String>,
+        #[command(flatten)]
+        service: Svc,
         /// Escribe el workflow en este repo (por defecto .github/workflows/foundathyon.yml).
         #[arg(long, value_name = "RUTA", num_args = 0..=1, default_missing_value = ".github/workflows/foundathyon.yml")]
         write_workflow: Option<PathBuf>,
     },
     /// Instala el workflow y su secreto en el repo de GitHub, por commit o pull request.
-    #[command(after_help = "Con --mode commit, Core hace commit en la rama: ese push dispara un build y deja tu copia local atrás (haz git pull).")]
+    #[command(after_help = "Sin --mode usa el workflow_mode del servicio (commit o pull_request), o pull_request si es manual.\nCon --mode commit, Core hace commit en la rama: ese push dispara un build y deja tu copia local atrás (haz git pull).")]
     InstallWorkflow {
-        service: Option<String>,
-        #[arg(long, value_parser = ["commit", "pull_request"], default_value = "pull_request")]
-        mode: String,
+        #[command(flatten)]
+        service: Svc,
+        /// commit o pull_request (por defecto el modo del servicio, o pull_request).
+        #[arg(long, value_parser = ["commit", "pull_request"])]
+        mode: Option<String>,
         #[arg(long)]
         dry_run: bool,
     },
     /// Crea un token fdr_ nuevo del registry y REVOCA el anterior: el workflow deja de poder publicar
-    /// imágenes hasta que actualices el secreto del repo. Exige --confirm <slug>.
+    /// imágenes hasta que actualices el secreto del repo. Exige --confirm <slug>, también con --dry-run.
     RotateRegistryToken {
-        service: String,
+        #[command(flatten)]
+        service: Svc,
         #[arg(long, value_name = "SLUG")]
         confirm: Option<String>,
         /// Imprime el token nuevo.
@@ -477,13 +536,15 @@ pub enum ServiceCommand {
     },
     /// Reinicia el contenedor con la misma imagen y ajustes (sin deployment nuevo).
     Restart {
-        service: Option<String>,
+        #[command(flatten)]
+        service: Svc,
         #[arg(long)]
         dry_run: bool,
     },
-    /// Pausa el servicio: 0 contenedores (deja de responder). Exige --confirm <slug>.
+    /// Pausa el servicio: 0 contenedores (deja de responder). Exige --confirm <slug>, también con --dry-run.
     Pause {
-        service: String,
+        #[command(flatten)]
+        service: Svc,
         #[arg(long, value_name = "SLUG")]
         confirm: Option<String>,
         #[arg(long)]
@@ -491,7 +552,8 @@ pub enum ServiceCommand {
     },
     /// Reanuda un servicio pausado con la imagen más reciente.
     Resume {
-        service: Option<String>,
+        #[command(flatten)]
+        service: Svc,
         #[command(flatten)]
         wait: Wait,
         #[arg(long)]
@@ -499,7 +561,8 @@ pub enum ServiceCommand {
     },
     /// Explica por qué un servicio no despliega: los checks del repo, el workflow, la imagen y el deployment.
     Diagnose {
-        service: Option<String>,
+        #[command(flatten)]
+        service: Svc,
         /// Vuelve a leer GitHub sin esperar a la caché de 60 s.
         #[arg(long)]
         refresh: bool,
@@ -509,18 +572,19 @@ pub enum ServiceCommand {
 #[derive(Subcommand)]
 pub enum EnvCommand {
     /// Variables del servicio; los secretos salen enmascarados (la API nunca devuelve su valor).
+    #[command(after_help = "Ejemplos:\n  fdt env list tienda-web\n  fdt env list -s tienda-web --json")]
     List {
-        #[arg(long, short = 's')]
-        service: Option<String>,
+        #[command(flatten)]
+        service: Svc,
     },
     /// Crea o cambia variables. Un cambio redespliega el servicio (env_change) si tiene imagen.
-    #[command(after_help = "Ejemplos:\n  fdt env set LOG_LEVEL=debug MODE=prod --service api\n  fdt env set STRIPE_KEY --secret --stdin --service api < key.txt\n  fdt env set STRIPE_KEY --secret --from-env STRIPE_KEY --service api\n  fdt env set DATABASE_URL --from-db tienda-pg --service api   # sin imprimir la URL")]
+    #[command(after_help = "Ejemplos:\n  fdt env set LOG_LEVEL=debug MODE=prod --service tienda-web\n  fdt env set STRIPE_KEY --secret --stdin -s tienda-web < key.txt\n  fdt env set STRIPE_KEY --secret --from-env STRIPE_KEY -s tienda-web\n  fdt env set DATABASE_URL --from-db tienda-pg -s tienda-web   # sin imprimir la URL")]
     Set {
-        /// KEY=VALUE (o solo KEY con --stdin o --from-db).
+        /// KEY=VALUE (o solo KEY con --stdin, --from-env, --from-file o --from-db).
         #[arg(required = true, value_name = "KEY=VALUE")]
         assignments: Vec<String>,
-        #[arg(long, short = 's')]
-        service: Option<String>,
+        #[command(flatten)]
+        service: SvcFlag,
         /// Guarda las variables como secretas.
         #[arg(long)]
         secret: bool,
@@ -539,23 +603,25 @@ pub enum EnvCommand {
         /// Lee el valor (de una sola KEY) de stdin.
         #[arg(long)]
         stdin: bool,
+        /// Muestra el cambio sin escribirlo (con --from-db no lee la contraseña de la base).
         #[arg(long)]
         dry_run: bool,
     },
-    /// Quita variables. Las que no existen se ignoran.
+    /// Quita variables. Avisa de las que no existen.
     Unset {
         #[arg(required = true)]
         keys: Vec<String>,
-        #[arg(long, short = 's')]
-        service: Option<String>,
+        #[command(flatten)]
+        service: SvcFlag,
         #[arg(long)]
         dry_run: bool,
     },
     /// Sube un archivo .env y lo mezcla con lo que hay.
     Import {
+        /// El archivo .env (- es stdin).
         file: PathBuf,
-        #[arg(long, short = 's')]
-        service: Option<String>,
+        #[command(flatten)]
+        service: SvcFlag,
         /// Todas las del archivo como secretas.
         #[arg(long)]
         secret: bool,
@@ -570,8 +636,8 @@ pub enum EnvCommand {
     },
     /// Baja las variables no secretas en formato .env (los secretos van como comentario).
     Pull {
-        #[arg(long, short = 's')]
-        service: Option<String>,
+        #[command(flatten)]
+        service: Svc,
         /// Archivo de salida (por defecto stdout).
         #[arg(long, short = 'o')]
         output: Option<PathBuf>,
@@ -591,6 +657,7 @@ pub enum DbCommand {
     Create {
         /// 3-32 caracteres a-z, 0-9, -.
         name: String,
+        /// Motor: postgres o mongo, si la organización lo ofrece (fdt db list --json → engines).
         #[arg(long, value_parser = ["postgres", "mongo"], default_value = "postgres")]
         engine: String,
         /// Nombre de la base dentro del motor (por defecto fd_<org>_<nombre>).
@@ -612,7 +679,7 @@ pub enum DbCommand {
         #[arg(long)]
         dry_run: bool,
     },
-    /// Borra una base. Exige --confirm <nombre exacto>.
+    /// Borra una base. Exige --confirm <nombre exacto>, también con --dry-run.
     Delete {
         db: String,
         #[arg(long, value_name = "NOMBRE")]
@@ -638,7 +705,8 @@ pub enum DbCommand {
         reveal: bool,
     },
     /// Cambia el usuario y/o la contraseña de una base Postgres. Las apps que la usan dejan de conectar
-    /// hasta que actualices su DATABASE_URL (fdt env set DATABASE_URL --from-db). Exige --confirm <nombre>.
+    /// hasta que actualices su DATABASE_URL (fdt env set DATABASE_URL --from-db). Exige --confirm <nombre>,
+    /// también con --dry-run.
     SetCredentials {
         db: String,
         /// Usuario nuevo.
@@ -684,7 +752,7 @@ pub enum SkillsCommand {
         #[arg(required = true)]
         skills: Vec<String>,
     },
-    /// Quita skills que instaló fdt (nunca una escrita a mano).
+    /// Quita skills que instaló fdt (all = todas las suyas; nunca una escrita a mano).
     Remove {
         #[arg(required = true)]
         skills: Vec<String>,
@@ -705,7 +773,7 @@ pub async fn main() {
                 let message = error.kind().to_string();
                 let detail = error.to_string();
                 let body = serde_json::json!({"ok": false, "error": {
-                    "kind": "usage", "exit_code": 2, "message": message, "detail": detail.trim(),
+                    "kind": "usage", "exit_code": 2, "scope": "fdt.usage", "message": message, "detail": detail.trim(),
                     "hint": "fdt <comando> --help",
                 }});
                 eprintln!("{}", serde_json::to_string_pretty(&body).unwrap_or_default());
@@ -748,7 +816,7 @@ pub async fn run(cli: Cli) -> Result<()> {
                 session::token_create(&ctx, name, level, projects, expires_in_days, reveal, output, dry_run).await
             }
             TokenCommand::List => session::token_list(&ctx).await,
-            TokenCommand::Revoke { token, dry_run } => session::token_revoke(&ctx, token, dry_run).await,
+            TokenCommand::Revoke { token, confirm, dry_run } => session::token_revoke(&ctx, token, confirm, dry_run).await,
         },
         Command::Use { org } => misc::use_org(&mut ctx, org).await,
         Command::Link { project, service } => misc::link(&ctx, project, service).await,
@@ -775,41 +843,66 @@ pub async fn run(cli: Cli) -> Result<()> {
         },
         Command::Service { command } => match *command {
             ServiceCommand::List { project: p } => service::list(&ctx, p).await,
-            ServiceCommand::Show { service: s } => service::show(&ctx, s).await,
+            ServiceCommand::Show { service: s } => service::show(&ctx, s.get()).await,
             ServiceCommand::Create(args) => service::create(&ctx, args).await,
             ServiceCommand::Update(args) => service::update(&ctx, args).await,
-            ServiceCommand::Delete { service: s, confirm, dry_run } => service::delete(&ctx, s, confirm, dry_run).await,
-            ServiceCommand::Setup { service: s, write_workflow } => service::setup(&ctx, s, write_workflow).await,
-            ServiceCommand::InstallWorkflow { service: s, mode, dry_run } => service::install_workflow(&ctx, s, mode, dry_run).await,
+            ServiceCommand::Delete { service: s, confirm, dry_run } => {
+                service::delete(&ctx, s.get(), confirm, dry_run).await
+            }
+            ServiceCommand::Setup { service: s, write_workflow } => service::setup(&ctx, s.get(), write_workflow).await,
+            ServiceCommand::InstallWorkflow { service: s, mode, dry_run } => {
+                service::install_workflow(&ctx, s.get(), mode, dry_run).await
+            }
             ServiceCommand::RotateRegistryToken { service: s, confirm, reveal, output, dry_run } => {
-                service::rotate_registry_token(&ctx, s, confirm, reveal, output, dry_run).await
+                service::rotate_registry_token(&ctx, s.get(), confirm, reveal, output, dry_run).await
             }
-            ServiceCommand::Restart { service: s, dry_run } => service::lifecycle(&ctx, s, "restart", None, None, dry_run).await,
+            ServiceCommand::Restart { service: s, dry_run } => service::lifecycle(&ctx, s.get(), "restart", None, None, dry_run).await,
             ServiceCommand::Pause { service: s, confirm, dry_run } => {
-                service::lifecycle(&ctx, Some(s), "pause", confirm, None, dry_run).await
+                service::lifecycle(&ctx, s.get(), "pause", confirm, None, dry_run).await
             }
-            ServiceCommand::Resume { service: s, wait, dry_run } => service::lifecycle(&ctx, s, "resume", None, Some(wait), dry_run).await,
-            ServiceCommand::Diagnose { service: s, refresh } => service::diagnose(&ctx, s, refresh).await,
+            ServiceCommand::Resume { service: s, wait, dry_run } => {
+                service::lifecycle(&ctx, s.get(), "resume", None, Some(wait), dry_run).await
+            }
+            ServiceCommand::Diagnose { service: s, refresh } => service::diagnose(&ctx, s.get(), refresh).await,
         },
-        Command::Deploy { service: s, rebuild, wait, dry_run } => deploy::deploy(&ctx, s, rebuild, wait, dry_run).await,
+        Command::Deploy { service: s, rebuild, wait, dry_run } => deploy::deploy(&ctx, s.get(), rebuild, wait, dry_run).await,
         Command::Rollback { service: s, tag, digest, to, wait, dry_run } => {
-            deploy::rollback(&ctx, s, tag, digest, to, wait, dry_run).await
+            deploy::rollback(&ctx, s.get(), tag, digest, to, wait, dry_run).await
         }
-        Command::Redeploy { service: s, wait, dry_run } => deploy::redeploy(&ctx, s, wait, dry_run).await,
-        Command::Deploys { service: s, deployment, limit, job, tail } => {
+        Command::Redeploy { service: s, wait, dry_run } => deploy::redeploy(&ctx, s.get(), wait, dry_run).await,
+        Command::Deploys { service: s, deployment, service_flag, limit, job, tail } => {
+            // With -s (or a linked service) a single argument is the deployment.
+            let (s, deployment) = match (service_flag, s, deployment) {
+                (Some(_), Some(_), Some(_)) => {
+                    return Err(failure::fail(
+                        failure::Kind::Usage,
+                        "Con -s el servicio ya está: pasa solo el deployment (fdt deploys -s <servicio> <deployment>).",
+                    ));
+                }
+                (Some(flag), first, None) => (Some(flag), first),
+                (None, first, second) => (first, second),
+                (Some(flag), None, second) => (Some(flag), second),
+            };
+            if job.is_some() && deployment.is_none() {
+                return Err(failure::fail_hint(
+                    failure::Kind::Usage,
+                    "--job necesita el deployment: fdt deploys <servicio> <deployment> --job <id>.",
+                    "fdt deploys <servicio> para ver los deployments",
+                ));
+            }
             deploy::deploys(&ctx, s, deployment, limit, job, tail).await
         }
-        Command::Logs { service: s, tail, since, until } => deploy::logs(&ctx, s, tail, since, until).await,
+        Command::Logs { service: s, tail, since, until } => deploy::logs(&ctx, s.get(), tail, since, until).await,
         Command::Env { command } => match command {
-            EnvCommand::List { service: s } => env::list(&ctx, s).await,
+            EnvCommand::List { service: s } => env::list(&ctx, s.get()).await,
             EnvCommand::Set { assignments, service: s, secret, from_db, from_env, from_file, public, stdin, dry_run } => {
-                env::set(&ctx, env::SetArgs { assignments, service: s, secret, from_db, from_env, from_file, public, stdin, dry_run }).await
+                env::set(&ctx, env::SetArgs { assignments, service: s.service, secret, from_db, from_env, from_file, public, stdin, dry_run }).await
             }
-            EnvCommand::Unset { keys, service: s, dry_run } => env::unset(&ctx, keys, s, dry_run).await,
+            EnvCommand::Unset { keys, service: s, dry_run } => env::unset(&ctx, keys, s.service, dry_run).await,
             EnvCommand::Import { file, service: s, secret, secret_keys, replace, dry_run } => {
-                env::import(&ctx, file, s, secret, secret_keys, replace, dry_run).await
+                env::import(&ctx, file, s.service, secret, secret_keys, replace, dry_run).await
             }
-            EnvCommand::Pull { service: s, output } => env::pull(&ctx, s, output).await,
+            EnvCommand::Pull { service: s, output } => env::pull(&ctx, s.get(), output).await,
         },
         Command::Db { command } => match command {
             DbCommand::List { project: p } => db::list(&ctx, p).await,
@@ -860,13 +953,21 @@ mod tests {
 
     #[test]
     fn accepts_the_plan_examples() {
-        assert!(parse(&["service", "create", "api", "--project", "tienda", "--repo", "acme/tienda-api", "--size", "512", "--json"]).is_ok());
+        assert!(parse(&["service", "create", "tienda-web", "--project", "tienda", "--repo", "acme/tienda-web", "--size", "512", "--json"]).is_ok());
         assert!(parse(&["env", "set", "DATABASE_URL", "--from-db", "tienda-pg", "--service", "api"]).is_ok());
         assert!(parse(&["deploy", "api", "--wait", "--json"]).is_ok());
         assert!(parse(&["logs", "api", "--since", "10m"]).is_ok());
         assert!(parse(&["service", "diagnose", "api", "--json"]).is_ok());
         assert!(parse(&["deploys", "api", "abc123", "--job", "42"]).is_ok());
-        assert!(parse(&["deploys", "api", "--job", "42"]).is_err());
+        // --job without a deployment is refused when it runs (-s changes which argument is which).
+        assert!(parse(&["deploys", "-s", "tienda-web", "abc", "--job", "42"]).is_ok());
+        assert!(parse(&["env", "list", "tienda-web"]).is_ok());
+        assert!(parse(&["env", "list", "-s", "tienda-web"]).is_ok());
+        assert!(parse(&["env", "list", "tienda-web", "-s", "otro"]).is_err());
+        assert!(parse(&["logs", "-s", "tienda-web"]).is_ok());
+        assert!(parse(&["service", "pause", "-s", "tienda-web", "--confirm", "tienda-web"]).is_ok());
+        assert!(parse(&["service", "create", "--repo", "acme/web", "--size", "256"]).is_ok());
+        assert!(parse(&["token", "revoke", "x", "--confirm", "x"]).is_ok());
         assert!(parse(&["project", "delete", "tienda", "--confirm", "tienda", "--dry-run"]).is_ok());
         assert!(parse(&["token", "create", "ci", "--level", "deploy", "-p", "tienda", "--expires-in-days", "30"]).is_ok());
         assert!(parse(&["token", "create", "ci", "--level", "owner"]).is_err());

@@ -5,6 +5,10 @@ al publicar el tag; aquí queda lo que cambia para quien usa el CLI.
 
 ## [Unreleased]
 
+## [0.1.6] - 2026-11-26
+
+- `fdt-deploy` (0.7.0) tiene modo `dockerize` (`/fdt-deploy dockerize`): el agente solo lee el repo y dice dónde está o dónde va el Dockerfile, el build context, el puerto, el host, la ruta de salud, el comando de arranque y las variables; revisa el Dockerfile regla por regla, propone los flags de `fdt service create` y solo escribe el Dockerfile y el `.dockerignore` si la persona dice que sí ([#18](https://github.com/fundathyon/fdt-cli/pull/18)).
+
 ## [0.1.5] - 2026-11-25
 
 - Skills nuevas `foundathyon` (punto de entrada y app desde cero) y `fdt-org` (plan, cuotas, miembros y tokens); `fdt-basics` y `fdt-deploy` (0.6.1), `fdt-databases` (0.3.1) y `fdt-troubleshoot` (0.5.1) remiten a ellas y recogen lo que encontraron agentes de prueba: receta de migraciones al arrancar el servicio, variables antes del primer build (`--workflow-mode manual`), repo en GitHub como requisito, detectar el puerto y las variables, `fdt status` como primer paso y cuándo vale `fdt api`. `accounts-integration` a 0.33.1: en la plataforma la app se crea en el panel y la secret key la guarda la persona (`fdt` no opera Accounts) ([fundathyon/accounts#215](https://github.com/fundathyon/accounts/pull/215)) ([#15](https://github.com/fundathyon/fdt-cli/pull/15)).

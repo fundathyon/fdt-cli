@@ -1,8 +1,9 @@
 ---
 name: fdt-deploy
 description: Lleva un repo de GitHub a producción en Foundathyon de punta a punta con `fdt`: Dockerfile, proyecto, servicio, workflow de GitHub Actions, variables y secretos, `fdt deploy --wait` y verificación. Actívala cuando la persona diga "despliega esta app", "súbela a Foundathyon", "crea el servicio", "pon esto en producción" o quiera el primer deploy de un repo. Para redeploys de un servicio ya vivo basta fdt-basics.
+argument-hint: "[dockerize]"
 metadata:
-  version: "0.6.1"
+  version: "0.7.0"
   owner: fundathyon
 ---
 
@@ -12,6 +13,119 @@ Flujo real: el build corre en **GitHub Actions del repo** (workflow con
 `fundathyon/deploy-action`), sube la imagen al registry y Foundathyon la
 despliega. `fdt` crea el servicio, instala el workflow y lanza/espera el deploy.
 Lee antes `fdt-basics` (sesión, `--json`, códigos, seguridad).
+
+Argumento: si la persona invoca `/fdt-deploy dockerize` (o pide "¿está listo mi
+repo para Docker?", "revisa mi Dockerfile", "dockeriza esto"), haz **solo** la
+sección "Modo dockerize" y para. Sin argumento, sigue el flujo completo.
+
+## Modo dockerize: revisar y recomendar
+
+Solo lee el repo: no crea proyecto ni servicio, no llama a la API, no escribe
+archivos ni hace commit hasta que la persona lo apruebe. No hace falta sesión
+de `fdt`.
+
+1. **Detecta** leyendo el repo (no inventes; si algo no se puede saber, dilo):
+   - Stack y versión: `package.json` (+ lockfile: npm, pnpm, yarn, bun),
+     `go.mod`, `requirements.txt`/`pyproject.toml`, `Cargo.toml`, `pom.xml`/
+     `build.gradle`, `Gemfile`, `composer.json`; versión de `.nvmrc`,
+     `engines`, `go` del go.mod, `python_requires`…
+   - Monorepo: workspaces, `apps/*`, `packages/*`, varios `go.mod`. Decide
+     qué carpeta es la app y si el build necesita la raíz (paquetes compartidos).
+   - Dockerfile: busca `Dockerfile*` y `*.dockerfile` en todo el repo (sin
+     `node_modules`, `vendor`, `target`). Anota ruta y build context.
+   - Puerto: `listen(`, `.Listen(`, `bind`, `uvicorn --port`, `PORT`, `EXPOSE`,
+     scripts `start` del package.json, defaults del framework (Next 3000, Vite
+     preview 4173, Flask 5000, Django 8000, Rails 3000). Si lee `$PORT`, dilo.
+     Si las fuentes no coinciden, manda lo que de verdad arranca (el código y
+     el `CMD`); un `EXPOSE` distinto es un ❌.
+   - Host: juzga el comando que corre en el contenedor (el `CMD`, o el que
+     vas a proponer si no hay Dockerfile), no `python main.py` ni otro.
+     Escuchan en `0.0.0.0` por defecto: `next start`. En `127.0.0.1` por
+     defecto (hay que pasar el host): `uvicorn` y `flask run` sin `--host`,
+     `vite preview` sin `--host`. Next standalone (`node server.js`) usa
+     `HOSTNAME`: pon `ENV HOSTNAME=0.0.0.0`.
+   - Salud: rutas tipo `/health`, `/healthz`, `/api/health`, `/status`.
+   - Arranque: comando de producción (`start`, binario, `gunicorn`…), no el de dev
+     (`next dev`, `npm run dev`, `--reload`, `flask run --debug`).
+   - Variables: las que lee el código (`process.env.X`, `os.Getenv`,
+     `os.environ`, `.env.example`). Marca cada una: secreta, con default u
+     obligatoria. Secreta = el nombre lleva `KEY`, `SECRET`, `TOKEN`,
+     `PASSWORD`, o es una URL con credenciales (`DATABASE_URL`, `REDIS_URL`). `PORT` no va: la fija la plataforma. `NEXT_PUBLIC_*` (y
+     `VITE_*`) se meten en el JS al hacer el build: si la página no es dinámica,
+     van como `ARG` en la etapa de build; son públicas, no secretas.
+   - Base de datos o migraciones al arrancar (Prisma, Drizzle, Alembic,
+     goose…): ver `fdt-databases`.
+
+2. **Revisa el Dockerfile** si existe, regla por regla (✅/⚠️/❌):
+   - Construye la app en modo producción y el `CMD` arranca el comando de
+     producción.
+   - `EXPOSE` coincide con el puerto que escucha la app.
+   - Escucha en `0.0.0.0`.
+   - `.dockerignore` existe y deja fuera `.git`, `node_modules`, `.env*`,
+     artefactos de build.
+   - Sin secretos en `ENV`/`ARG`/`COPY .env`. Si ya hay uno en un archivo
+     versionado, está en el historial de git: di que hay que **rotarlo**, no
+     solo quitarlo, y que va como secreto del servicio (`fdt env set K --secret
+     --stdin`).
+   - Dependencias reproducibles: con lockfile, `npm ci` / `pnpm install
+     --frozen-lockfile`; copia los manifiestos e instala **antes** de `COPY . .`
+     (caché de capas).
+   - Imagen base oficial y con versión fija (no `latest`) que coincida con la
+     del repo (`.nvmrc`, `.python-version`…); multi-stage si hay paso de build;
+     no corre como root si la imagen lo permite.
+   - Next.js: `output: "standalone"` en `next.config.*` y `COPY` de `public/`
+     solo si la carpeta existe (si no, el build falla).
+   - Cabe en memoria: el plan Free/Starter da 256 MB. Di "debería bastar" para
+     un solo proceso ligero; avisa si es pesado (Java sin `-Xmx`, Next sin
+     standalone, varios procesos) y que solo se sabe midiendo.
+   - Rutas: `COPY` relativas al build context que vas a recomendar.
+
+   Sin Dockerfile no repitas regla por regla: la línea "Dockerfile" ya dice
+   que falta y lleva un resumen de una línea del que propones; la revisión es
+   solo lo demás que le falta al repo (`.dockerignore`, `standalone`, ruta de
+   salud…).
+
+3. **Responde con este informe**, en el idioma de la persona. Corto: en
+   "Revisión" solo lo que no pasa, ❌ si rompe el deploy o la seguridad (no
+   arranca, puerto u host mal, modo dev, secreto, `latest`, falta
+   `.dockerignore`), ⚠️ si es una mejora (caché, root, `npm ci`); nada de ✅
+   ni de reglas que no aplican. Si el Dockerfile está mal, escribe "hoy → debe":
+
+   ```
+   Stack:          Next.js 15 (pnpm), Node 22
+   Dockerfile:     ./Dockerfile (existe) | no existe → propongo ./Dockerfile
+   Build context:  .            (monorepo: --dockerfile apps/web/Dockerfile --build-context .)
+   Puerto:         3000 (lee $PORT; next start)   → --port 3000   | EXPOSE 8080 → 3000 ❌
+   Host:           0.0.0.0 ✅    | CMD con --host 127.0.0.1 → 0.0.0.0 ❌
+   Health:         /api/health  → --health-path /api/health  | no hay: propongo crearla
+   Arranque:       node server.js   | hoy npm run dev ❌
+   Memoria:        256 MB debería bastar
+   Variables:      DATABASE_URL (secreta), NEXT_PUBLIC_API_URL (build), LOG_LEVEL (default info)
+   Repo:           acme/tienda-web en GitHub (git remote) ✅; la GitHub App se comprueba en el panel | sin remoto: hay que crearlo y subirlo
+   Revisión:
+     ❌ ENV STRIPE_KEY=… en el Dockerfile → quitarlo, rotar la llave, fdt env set --secret
+     ⚠️ npm install → npm ci
+   ```
+
+   Cierra con:
+   - Los flags para `fdt service create`: siempre `--port` y `--health-path`;
+     `--dockerfile`/`--build-context` solo si no son `./Dockerfile` y `.`;
+     `--memory` solo si no basta con 256.
+   - El orden: el Dockerfile tiene que estar en la rama (commit y push) antes
+     de crear el servicio, porque el workflow lanza el primer build con ese push.
+   - Una pregunta con los archivos exactos que tocarías: ¿escribo/arreglo el
+     `Dockerfile`, el `.dockerignore` (y `next.config.*`, la ruta de salud…)?
+
+4. **Si dice que sí**: escribe o corrige esos archivos (si ya hay servicio,
+   parte de la plantilla de `fdt service setup <svc> --json`,
+   `data.setup.recommended_dockerfile`). `.dockerignore` con `.git`, `.env*`
+   (y `!.env.example` si la app lo lee) más lo del stack: Node `node_modules`,
+   `.next`, `dist`; Python `__pycache__`, `.venv`; Go/Rust el binario o
+   `target`. Si Docker está disponible, compruébalo
+   con `docker build -f <dockerfile> <context>` y, si hay tiempo, `docker run
+   -p <puerto>:<puerto>` + un GET a la ruta de salud; di si no pudiste. Commit
+   y push solo con permiso explícito; recuerda que con el workflow ya instalado
+   ese push dispara un build.
 
 Requisito: la organización tiene la GitHub App instalada y el repo accesible
 (se vincula en el panel; no hay comando). Si `service create` falla con

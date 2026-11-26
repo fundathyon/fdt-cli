@@ -19,7 +19,7 @@ description: >-
   RBAC (claim role, POST /api/v1/authorize, policies y verificador Go). Skill portable — no
   requiere el repo de accounts.
 metadata:
-  version: "0.33.0"
+  version: "0.33.1"
 ---
 
 # Foundathyon Accounts API — skill completo de integración
@@ -89,7 +89,7 @@ API REST **self-hosted** de autenticación multi-tenant:
 | Regla | Detalle |
 |-------|---------|
 | `{BASE_URL}` | `https://host` + `ROOT_PATH` → ej. `http://localhost:8000/accounts` |
-| Rutas de apps | `POST {BASE_URL}/v1/apps` — **sin** `/api` |
+| Crear la app | En la plataforma Foundathyon la crea la persona en el panel (proyecto → nuevo servicio → Accounts): nunca el curl. En un Accounts propio (self-hosted): `POST {BASE_URL}/v1/apps` — **sin** `/api` |
 | Rutas de auth | `{BASE_URL}/api/v1/...` — **con** `/api` |
 | Cliente | `X-API-Key: pk_live_...` (publishable_key) |
 | Servidor admin | `X-API-Key: sk_live_...` (secret_key) — **nunca en frontend**. Lleva scopes (`"*"` = todo; sin el scope → `403 api_keys.scope_denied` con `error.meta.required_scope`) |
@@ -111,8 +111,15 @@ API REST **self-hosted** de autenticación multi-tenant:
 
 ## Happy path (copiar tal cual)
 
+> **¿Usas la plataforma Foundathyon?** Sáltate el paso 1: la app la crea la persona
+> en el panel (proyecto → nuevo servicio → Accounts). Pídele el `app_id`, la
+> publishable key y la URL base del servicio (`{BASE_URL}`), que muestra el panel.
+> La secret key nunca por el chat: que la guarde ella en el servicio
+> (`fdt env set ACCOUNTS_SECRET_KEY --secret -s <servicio>`, la pide sin eco).
+> El curl del paso 1 es para un Accounts propio (self-hosted).
+
 ```bash
-# 1. Crear app
+# 1. Crear app (solo self-hosted; en Foundathyon se crea en el panel)
 curl -X POST "{BASE_URL}/v1/apps" \
   -H "Content-Type: application/json" \
   -d '{"name":"Mi App","root_email":"admin@example.com"}'

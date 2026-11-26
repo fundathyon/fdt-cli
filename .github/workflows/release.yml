@@ -3,7 +3,7 @@
 #   fdt-x86_64-unknown-linux-musl.tar.gz    fdt-aarch64-unknown-linux-musl.tar.gz   (static, any distro)
 #   fdt-x86_64-apple-darwin.tar.gz          fdt-aarch64-apple-darwin.tar.gz
 #   fdt-x86_64-pc-windows-msvc.zip
-#   <each archive>.sha256, SHA256SUMS, install.sh, install.ps1
+#   <each archive>.sha256, SHA256SUMS, install.sh, setup.sh, install.ps1
 #
 # install.sh, install.ps1 and `fdt update` (src/update.rs) read exactly these names. A tag with a
 # suffix (v0.2.0-rc.1) is published as a prerelease, which `releases/latest` (and so the installers
@@ -155,7 +155,7 @@ jobs:
           [ "$actual" = "$expected" ] || { ls -l; echo "::error::Se esperaba: $expected; llegó: $actual"; exit 1; }
           sha256sum fdt-* > SHA256SUMS
           for f in fdt-*; do grep " ${f}\$" SHA256SUMS > "${f}.sha256"; done
-          cp ../install.sh ../install.ps1 .
+          cp ../install.sh ../setup.sh ../install.ps1 .
           cat SHA256SUMS
           ls -l
       - name: Publish
@@ -185,6 +185,14 @@ jobs:
           export FDT_INSTALL_DIR="$RUNNER_TEMP/fdt-bin"
           curl -fsSL "https://github.com/${GITHUB_REPOSITORY}/releases/download/${GITHUB_REF_NAME}/install.sh" | sh
           [ "$("$FDT_INSTALL_DIR/fdt" --version)" = "fdt ${GITHUB_REF_NAME}" ]
+      - name: setup.sh (without login)
+        if: runner.os != 'Windows'
+        run: |
+          export HOME="$RUNNER_TEMP/fdt-home" FDT_INSTALL_DIR="$RUNNER_TEMP/fdt-home/bin" FDT_SKIP_LOGIN=1
+          mkdir -p "$HOME"
+          curl -fsSL "https://github.com/${GITHUB_REPOSITORY}/releases/download/${GITHUB_REF_NAME}/setup.sh" | sh
+          [ "$("$FDT_INSTALL_DIR/fdt" --version)" = "fdt ${GITHUB_REF_NAME}" ]
+          [ -f "$HOME/.claude/skills/fdt-basics/SKILL.md" ]
       - name: install.ps1
         if: runner.os == 'Windows'
         shell: pwsh

@@ -138,6 +138,35 @@ fn read_marker(dir: &Path) -> Option<Value> {
     serde_json::from_str(&std::fs::read_to_string(dir.join(MARKER)).ok()?).ok()
 }
 
+/// The `name:` of a SKILL.md front matter, which is how agents identify a skill.
+fn front_matter_name(skill_md: &Path) -> Option<String> {
+    let text = std::fs::read_to_string(skill_md).ok()?;
+    let front = text.strip_prefix("---")?.split("\n---").next()?.to_owned();
+    front
+        .lines()
+        .find_map(|l| l.strip_prefix("name:").map(|n| n.trim().trim_matches('"').trim_matches('\'').to_owned()))
+}
+
+/// Why installing skill `name` into `dir` would clash with one fdt did not
+/// install: a folder of that name, or another skill that declares the same
+/// `name:`. `None` means it is free (or fdt's own, which it may replace).
+fn conflict(dir: &Path, name: &str) -> Option<(PathBuf, String)> {
+    let target = dir.join(name);
+    if target.exists() && read_marker(&target).is_none() {
+        return Some((target, "existe y no la instaló fdt".into()));
+    }
+    for entry in std::fs::read_dir(dir).ok()?.flatten() {
+        let path = entry.path();
+        if path == target || !path.is_dir() || read_marker(&path).is_some() {
+            continue;
+        }
+        if front_matter_name(&path.join("SKILL.md")).as_deref() == Some(name) {
+            return Some((path, format!("declara name: {name} y no la instaló fdt")));
+        }
+    }
+    None
+}
+
 fn install(dir: &Path, name: &str, files: &BTreeMap<String, Vec<u8>>, source: &str) -> Result<()> {
     let target = dir.join(name);
     if target.exists() {
@@ -204,6 +233,7 @@ pub fn run(ctx: &Ctx, action: Action, options: Options) -> Result<()> {
         Ok(requested)
     };
 
+    let mut skipped: Vec<Value> = Vec::new();
     let (verb, done): (&str, Vec<Value>) = match action {
         Action::List => {
             let list: Vec<Value> = catalog
@@ -226,12 +256,22 @@ pub fn run(ctx: &Ctx, action: Action, options: Options) -> Result<()> {
             });
         }
         Action::Add(requested) => {
-            let mut done = Vec::new();
+            // Every clash is found before writing anything, and skipped: a
+            // skill the person wrote (or got elsewhere) is never replaced, and
+            // one clash does not leave the rest half-installed.
+            let mut plan = Vec::new();
             for name in names(requested)? {
                 for dir in &dirs {
-                    install(dir, &name, &catalog[&name], &source)?;
-                    done.push(json!({"skill": name, "path": dir.join(&name)}));
+                    match conflict(dir, &name) {
+                        Some((path, reason)) => skipped.push(json!({"skill": name, "path": path, "reason": reason})),
+                        None => plan.push((dir, name.clone())),
+                    }
                 }
+            }
+            let mut done = Vec::new();
+            for (dir, name) in plan {
+                install(dir, &name, &catalog[&name], &source)?;
+                done.push(json!({"skill": name, "path": dir.join(&name)}));
             }
             ("instaladas", done)
         }
@@ -239,10 +279,15 @@ pub fn run(ctx: &Ctx, action: Action, options: Options) -> Result<()> {
             let mut done = Vec::new();
             for (name, files) in &catalog {
                 for dir in &dirs {
-                    if read_marker(&dir.join(name)).is_some() {
-                        install(dir, name, files, &source)?;
-                        done.push(json!({"skill": name, "path": dir.join(name)}));
+                    if read_marker(&dir.join(name)).is_none() {
+                        continue;
                     }
+                    if let Some((path, reason)) = conflict(dir, name) {
+                        skipped.push(json!({"skill": name, "path": path, "reason": reason}));
+                        continue;
+                    }
+                    install(dir, name, files, &source)?;
+                    done.push(json!({"skill": name, "path": dir.join(name)}));
                 }
             }
             ("actualizadas", done)
@@ -306,7 +351,15 @@ pub fn run(ctx: &Ctx, action: Action, options: Options) -> Result<()> {
         }
     };
     crate::ui::success(&format!("Skills {verb}: {}.", done.len()));
-    ctx.out.print(&json!({"ok": true, "changed": done}), || {
+    for s in &skipped {
+        crate::ui::warn(&format!(
+            "{}: no se instaló, {} ({}). Renómbrala o bórrala si quieres la de fdt.",
+            crate::output::s(s, "skill"),
+            crate::output::s(s, "reason"),
+            crate::output::s(s, "path"),
+        ));
+    }
+    ctx.out.print(&json!({"ok": true, "changed": done, "skipped": skipped}), || {
         done.iter().map(|d| format!("  {}", crate::output::s(d, "path"))).collect::<Vec<_>>().join("\n")
     })
 }
@@ -333,5 +386,24 @@ mod tests {
         install(dir.path(), "x", &files, "test").unwrap();
         std::fs::create_dir_all(dir.path().join("mine")).unwrap();
         assert!(install(dir.path(), "mine", &files, "test").is_err());
+    }
+
+    #[test]
+    fn finds_clashes_by_folder_and_by_front_matter_name() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut files = BTreeMap::new();
+        files.insert("SKILL.md".to_owned(), b"---\nname: fdt-basics\n---\n".to_vec());
+        // Free, and fdt's own copy is not a clash.
+        assert!(conflict(dir.path(), "fdt-basics").is_none());
+        install(dir.path(), "fdt-basics", &files, "test").unwrap();
+        assert!(conflict(dir.path(), "fdt-basics").is_none());
+        // A hand-written folder with the same name.
+        std::fs::create_dir_all(dir.path().join("fdt-deploy")).unwrap();
+        assert!(conflict(dir.path(), "fdt-deploy").is_some());
+        // Another folder that declares the same name.
+        std::fs::create_dir_all(dir.path().join("my-db")).unwrap();
+        std::fs::write(dir.path().join("my-db/SKILL.md"), "---\nname: \"fdt-databases\"\n---\n").unwrap();
+        let (path, _) = conflict(dir.path(), "fdt-databases").unwrap();
+        assert_eq!(path, dir.path().join("my-db"));
     }
 }

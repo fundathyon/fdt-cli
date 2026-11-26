@@ -2,7 +2,7 @@
 name: fdt-deploy
 description: Lleva un repo de GitHub a producción en Foundathyon de punta a punta con `fdt`: Dockerfile, proyecto, servicio, workflow de GitHub Actions, variables y secretos, `fdt deploy --wait` y verificación. Actívala cuando la persona diga "despliega esta app", "súbela a Foundathyon", "crea el servicio", "pon esto en producción" o quiera el primer deploy de un repo. Para redeploys de un servicio ya vivo basta fdt-basics.
 metadata:
-  version: "0.5.0"
+  version: "0.6.1"
   owner: fundathyon
 ---
 
@@ -24,9 +24,27 @@ fdt context --json && fdt whoami --json     # level debe ser admin para crear
 fdt org usage --json                        # ¿hay cupo de servicios y memoria?
 ```
 
-Mira el repo: ¿hay `Dockerfile`? ¿qué puerto escucha la app? ¿ruta de salud?
-Sin Dockerfile, créalo y súbelo (commit y push a la rama) ANTES del paso 2: el
-workflow que instala `service create` dispara el primer build con ese push.
+Antes de nada, el código tiene que estar en un repo de GitHub con la GitHub
+App de Foundathyon instalada en la organización (eso se hace en el panel). Si
+la carpeta no es un repo de git o no tiene remoto en GitHub, para: pide a la
+persona el `owner/repo`, que lo cree y suba el código, y que instale la App.
+No crees el servicio hasta entonces.
+
+Mira el repo: ¿hay `Dockerfile`? ¿qué puerto escucha la app (busca `listen`,
+`bind`, `PORT`, `EXPOSE`; pásalo con `--port`, el defecto es 3000)? ¿ruta de
+salud? ¿qué variables lee (`.env.example`, `process.env`, `os.environ`)? Si la
+persona pide "configura las variables" sin decir cuáles, lista las que lee el
+código y pregúntale los valores; no inventes ninguna.
+Sin Dockerfile, escribe uno mínimo (imagen oficial del lenguaje, `EXPOSE` del
+puerto, `CMD` que arranca la app) y súbelo (commit y push, con permiso) ANTES
+del paso 2: el workflow que instala `service create` dispara el primer build
+con ese push. Tras crear el servicio, compáralo con la plantilla de
+`fdt service setup` (paso 3).
+
+Si hay que fijar variables antes del primer build (llaves, `DATABASE_URL`),
+crea el servicio con `--workflow-mode manual`, fija las variables (paso 4) y
+luego instala el workflow (`fdt service install-workflow --mode commit`), que
+lanza el build ya con todo.
 
 ## 2. Proyecto y servicio
 
@@ -147,9 +165,12 @@ Borrar el servicio (`fdt service delete … --confirm <slug>`, con permiso) no t
 
 ## 6. Opcional: login en la app
 
-Si la persona quiere usuarios, registro o login, usa la skill
-`accounts-integration` (Foundathyon Accounts; no la copies aquí). Las claves
-`secret_key` van como secretos del servicio (`--stdin`), nunca en el frontend.
+Si la persona quiere usuarios, registro o login: la app de Accounts la crea
+ella en el panel (`fdt` no opera Accounts). Pídele el `app_id`, la publishable
+key y `ACCOUNTS_BASE_URL`, guárdalos con `fdt env set`, y que ella guarde la
+secret key con `fdt env set ACCOUNTS_SECRET_KEY --secret -s <servicio>` en su
+terminal (nunca en el frontend ni por el chat). El código, con la skill
+`accounts-integration`.
 
 ## Si ya existe
 

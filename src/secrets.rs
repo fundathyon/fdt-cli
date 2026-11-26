@@ -136,16 +136,51 @@ pub fn save(home: &Path, key: &str, token: &str) -> Result<Store> {
     Ok(Store::File)
 }
 
+/// How long fdt waits for the keychain before saying why it is stuck, and
+/// before giving up: on macOS a new or updated binary has to be allowed in a
+/// system dialog, and until someone answers it the read just blocks.
+const KEYRING_NOTICE: std::time::Duration = std::time::Duration::from_secs(3);
+const KEYRING_GIVE_UP: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// The keychain read, on a thread, so a pending system dialog is reported
+/// (and eventually fails) instead of hanging fdt with no output.
+fn read_keyring(key: &str) -> Result<std::result::Result<String, keyring::Error>> {
+    use std::sync::mpsc::RecvTimeoutError;
+    let (tx, rx) = std::sync::mpsc::channel();
+    let key = key.to_owned();
+    std::thread::spawn(move || {
+        let _ = tx.send(keyring::Entry::new(SERVICE, &key).and_then(|e| e.get_password()));
+    });
+    match rx.recv_timeout(KEYRING_NOTICE) {
+        Ok(read) => return Ok(read),
+        Err(RecvTimeoutError::Disconnected) => return Err(anyhow::anyhow!("no se pudo leer el llavero del sistema")),
+        Err(RecvTimeoutError::Timeout) => {}
+    }
+    crate::ui::warn(
+        "Esperando al llavero del sistema: si macOS muestra un aviso de acceso para fdt, acéptalo («Permitir siempre»). Sin terminal (agentes, CI) usa FDT_TOKEN.",
+    );
+    match rx.recv_timeout(KEYRING_GIVE_UP - KEYRING_NOTICE) {
+        Ok(read) => Ok(read),
+        Err(_) => Err(crate::failure::Failure::new(
+            crate::failure::Kind::Unauthenticated,
+            format!(
+                "El llavero del sistema no respondió en {} s: hay un aviso de acceso sin contestar o el llavero está bloqueado.",
+                KEYRING_GIVE_UP.as_secs()
+            ),
+        )
+        .hint("acepta el aviso del llavero y reintenta, o exporta FDT_TOKEN con un token fdt_… (fdt token create)")
+        .into()),
+    }
+}
+
 /// Reads a token saved under `key` in `store`.
 pub fn load(home: &Path, key: &str, store: Store) -> Result<Option<String>> {
     match store {
-        Store::Keyring if keyring_available() => {
-            match keyring::Entry::new(SERVICE, key).and_then(|e| e.get_password()) {
-                Ok(token) => Ok(Some(token)),
-                Err(keyring::Error::NoEntry) => Ok(None),
-                Err(e) => Err(anyhow::anyhow!("no se pudo leer el llavero del sistema: {e}")),
-            }
-        }
+        Store::Keyring if keyring_available() => match read_keyring(key)? {
+            Ok(token) => Ok(Some(token)),
+            Err(keyring::Error::NoEntry) => Ok(None),
+            Err(e) => Err(anyhow::anyhow!("no se pudo leer el llavero del sistema: {e}")),
+        },
         Store::Keyring => Ok(None),
         Store::File => Ok(read_file(home)?.get(key).cloned()),
     }

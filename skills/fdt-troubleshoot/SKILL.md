@@ -2,7 +2,7 @@
 name: fdt-troubleshoot
 description: Diagnostica un deploy que falló o un servicio caído en Foundathyon con `fdt`: `service diagnose`, `deploys`, logs de los jobs del build en GitHub Actions y `logs` de ejecución. Incluye árbol de decisión por código de salida y `error.scope` (también `quota.*` y `cli.*`). Actívala cuando `fdt deploy --wait` salga con 7 u 8, un servicio no levante, se quede en awaiting_first_deploy, devuelva 5xx, o la persona pregunte "por qué no despliega" o "por qué está caído".
 metadata:
-  version: "0.5.0"
+  version: "0.5.1"
   owner: fundathyon
 ---
 
@@ -13,6 +13,7 @@ Solo lectura hasta entender la causa. Lee antes `fdt-basics`.
 ## Orden fijo
 
 ```sh
+fdt status --json                           # 0. qué servicios hay y cuál falla (último deploy)
 fdt service diagnose tienda-web --json      # 1. checks en orden; --refresh si cambió el repo hace <60 s
 fdt deploys tienda-web --json               # 2. historial: status, source, error_code
 fdt deploys tienda-web <id> --json          # 3. detalle (<id>: cualquier prefijo no ambiguo): data.deployment + data.build (run y jobs de Actions)

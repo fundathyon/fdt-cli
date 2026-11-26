@@ -9,6 +9,11 @@ Flujo mínimo para autenticar un usuario en **5 minutos**.
 
 ## Paso 1 — Crear aplicación
 
+> **En la plataforma Foundathyon** la app se crea en el panel (proyecto → nuevo servicio →
+> Accounts), que muestra el `app_id`, la `publishable_key` y la URL base. La `secret_key` la
+> guarda la persona en su servicio (`fdt env set ACCOUNTS_SECRET_KEY --secret -s <servicio>`);
+> no pasa por el chat. El curl de abajo es para un Accounts propio (self-hosted).
+
 Sin autenticación. Crea app, API keys, rol `default` y behavior email sin verificación.
 
 ```bash

@@ -5,6 +5,12 @@ al publicar el tag; aquí queda lo que cambia para quien usa el CLI.
 
 ## [Unreleased]
 
+## [0.1.5] - 2026-11-25
+
+- Skills nuevas `foundathyon` (punto de entrada y app desde cero) y `fdt-org` (plan, cuotas, miembros y tokens); `fdt-basics` y `fdt-deploy` (0.6.1), `fdt-databases` (0.3.1) y `fdt-troubleshoot` (0.5.1) remiten a ellas y recogen lo que encontraron agentes de prueba: receta de migraciones al arrancar el servicio, variables antes del primer build (`--workflow-mode manual`), repo en GitHub como requisito, detectar el puerto y las variables, `fdt status` como primer paso y cuándo vale `fdt api`. `accounts-integration` a 0.33.1: en la plataforma la app se crea en el panel y la secret key la guarda la persona (`fdt` no opera Accounts) ([fundathyon/accounts#215](https://github.com/fundathyon/accounts/pull/215)) ([#15](https://github.com/fundathyon/fdt-cli/pull/15)).
+- Si macOS tiene pendiente el aviso de acceso al llavero (pasa tras instalar o actualizar fdt), fdt ya no se queda colgado sin decir nada: a los 3 s avisa por stderr de que hay que aceptarlo o usar `FDT_TOKEN`, y a los 60 s sale con 3 ([#15](https://github.com/fundathyon/fdt-cli/pull/15)).
+- `evals/agent-prompts.md`: cómo probar las skills con un agente y los cuatro prompts de `setup.sh` ([#15](https://github.com/fundathyon/fdt-cli/pull/15)).
+
 ## [0.1.4] - 2026-11-25
 
 - `setup.sh`: instala el CLI, inicia sesión y deja todas las skills en tu usuario en un solo comando (`curl -fsSL …/releases/latest/download/setup.sh | sh`); al terminar da la bienvenida y sugiere prompts para empezar con tu agente (desplegar, crear una base de datos, una app con Foundathyon Accounts, revisar deploys); se publica con cada release ([#12](https://github.com/fundathyon/fdt-cli/pull/12)).

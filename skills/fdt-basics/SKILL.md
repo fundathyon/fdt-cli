@@ -2,17 +2,20 @@
 name: fdt-basics
 description: Reglas base para operar la infraestructura de una organización en Foundathyon con el CLI `fdt` (proyectos, servicios, deploys, logs, variables, bases de datos). Actívala siempre que la persona pida desplegar, ver el estado o los logs de un servicio, cambiar variables de entorno, crear o conectar una base de datos, o cualquier cosa de Foundathyon, aunque no diga "fdt". Cubre comprobar sesión y contexto, --json, códigos de salida, niveles de token y qué nunca hacer sin permiso explícito.
 metadata:
-  version: "0.5.0"
+  version: "0.6.1"
   owner: fundathyon
 ---
 
 # fdt: reglas base
 
 `fdt` opera una organización de Foundathyon. Es un cliente de la API de Core:
-lo que no tiene comando se hace con `fdt api`, no con curl.
+nunca uses curl contra la API. `fdt api` es para las rutas que una skill nombra
+(con el método y la ruta exactos); si no hay comando ni ruta documentada, di que
+hoy no se puede en vez de buscarla.
 
-Skills hermanas: `fdt-deploy` (repo a producción), `fdt-databases` (bases),
-`fdt-troubleshoot` (algo falla).
+Skills hermanas: `foundathyon` (mapa y app desde cero), `fdt-deploy` (repo a
+producción), `fdt-databases` (bases), `accounts-integration` (código del
+login con Accounts), `fdt-org` (plan, cuotas, miembros, tokens), `fdt-troubleshoot` (algo falla).
 
 ## Antes de tocar nada
 
@@ -23,6 +26,11 @@ fdt status --json      # servicios con su último deploy y bases
 fdt doctor --json      # si algo de lo anterior falla: API, sesión, org, .fdt.toml, llavero
 ```
 
+- Si `fdt` no responde y en stderr aparece "Esperando al llavero del sistema":
+  macOS pide permiso para leer el token (pasa tras instalar o actualizar fdt).
+  Pide a la persona que acepte el aviso ("Permitir siempre") y reintenta; a
+  los 60 s fdt sale con 3. En sesiones sin persona delante (CI, agentes en
+  segundo plano), la alternativa es que la persona exporte `FDT_TOKEN`.
 - Sin sesión (exit 3): pide a la persona que ejecute `fdt login` o exporte
   `FDT_TOKEN`. **Nunca** le pidas que pegue un token en el chat.
 - Sin organización activa: `fdt use <org>` o `--org <org>` en cada comando.
@@ -49,7 +57,7 @@ fdt doctor --json      # si algo de lo anterior falla: API, sesión, org, .fdt.t
 - Esperar es explícito: `deploy --wait --timeout 15m`, `redeploy|rollback|service resume --wait`, `env set|unset|import --wait` (espera el reinicio `env_change` si lo hay), `db create --wait`. `service restart` no tiene `--wait`: la API no dice cuándo vuelve a responder; si necesitas esperar, `fdt redeploy --wait`.
 - `fdt deploy` despliega la **cabeza de la rama**; `fdt redeploy` repite la **imagen que corre ahora** (después de un `rollback`, la del rollback; lo avisa y su `--dry-run` trae `data.image` y `data.newer_image`). Para volver a la última tras un rollback: `fdt deploy <svc> --wait`.
 - Un servicio `paused` tiene 0 contenedores y su URL responde un 502 genérico: `status`, `service list|show` y `logs` lo avisan por stderr. Se reanuda con `fdt service resume <svc> --wait` (pide permiso).
-- Nada imprime una contraseña o un token sin `--reveal` (`db url`, `db credentials`, `token create`, `service rotate-registry-token`).
+- Nada imprime una contraseña o un token sin `--reveal` (`db url`, `db credentials`, `token create`, `service rotate-registry-token`, `accounts credentials`, `accounts keys create|rotate`).
 
 ## Códigos de salida
 

@@ -313,11 +313,13 @@ fdt skills add all --from ./skills            # desde una carpeta en vez del bin
 
 | Skill | Para qué |
 |---|---|
+| `foundathyon` | Punto de entrada: qué es cada producto, qué skill usar y cómo crear una app desde cero |
 | `fdt-basics` | Reglas base: sesión, contexto, `--json`, códigos de salida, permisos |
 | `fdt-deploy` | Llevar un repo de GitHub a producción |
 | `fdt-databases` | Crear una base de datos y conectarla a un servicio |
+| `fdt-org` | Plan, consumo y cuotas, miembros y tokens para CI |
 | `fdt-troubleshoot` | Diagnosticar un deploy o un servicio que falla |
-| `accounts-integration` | Integrar login, registro, tokens, OAuth y demás de Foundathyon Accounts |
+| `accounts-integration` | Escribir el código que integra login, registro, tokens, OAuth y demás de Accounts |
 
 `accounts-integration` es una copia de `.agents/accounts-integration` del repo
 `fundathyon/accounts`. Para traer la última versión:

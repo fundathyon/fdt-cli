@@ -1,0 +1,106 @@
+# Magic link — autenticación passwordless
+
+Requiere behavior **magic link** activado en la app (admin con secret key).
+
+## Concepto clave
+
+El click del email **no** entrega JWT en la URL. Entrega un **token corto de un solo uso** que el frontend canjea por JWT vía POST.
+
+```
+Email click → tu página /auth/verify?token=RAW
+           → POST /magic-link/claim { token: RAW }
+           → JSON con access_token + refresh_token
+```
+
+**Por qué:** JWTs en URL se filtran en logs, history y scanners de email.
+
+---
+
+## Activar magic link (admin)
+
+```bash
+curl -X POST "{BASE_URL}/api/v1/app-behaviors/email/magic-link/activate" \
+  -H "Content-Type: application/json" \
+  -H "X-API-Key: {secret_key}" \
+  -d '{ "enabled": true }'
+```
+
+Config adicional en behavior `email_auth` (redirect paths, TTL, etc.).
+
+---
+
+## Request — enviar enlace
+
+Usuario ingresa email en tu UI:
+
+```bash
+curl -X POST "{BASE_URL}/api/v1/emails/magic-link/request" \
+  -H "Content-Type: application/json" \
+  -H "X-API-Key: {publishable_key}" \
+  -d '{
+    "email": "user@example.com",
+    "redirect_path": "/dashboard"
+  }'
+```
+
+- Si magic link **disabled** → 422
+- Email enviado con enlace que apunta a tu frontend + token raw
+
+**Embedded Auth (Pro):** con la cabecera `X-Accounts-Client`, el body acepta `redirect_url`, que debe ser exactamente una de las `redirect_urls` del behavior `embedded_auth`. El correo vuelve entonces a `redirect_url?accounts_ticket=<R>` (no hace falta `redirect_base_url`); con el `redirect_url` aceptado es obligatorio `code_challenge = base64url(SHA-256(verifier))` (si no, `422 embedded_auth.magic_link.challenge_required`), y el componente canjea `/claim` con `D = hex(HMAC-SHA256(code_challenge, R))`, no con `R` (solo funciona en el navegador que pidió el link). Fuera de la lista → `403 embedded_auth.redirect.not_allowed` sin enviar nada. Sin la cabecera, en Community o si no es un string, `redirect_url` se ignora. Ver [embedded-auth.md](embedded-auth.md).
+
+---
+
+## Claim — canjear token
+
+Tu página `/auth/verify` lee `token` de query params:
+
+```bash
+curl -X POST "{BASE_URL}/api/v1/emails/magic-link/claim" \
+  -H "Content-Type: application/json" \
+  -H "X-API-Key: {publishable_key}" \
+  -d '{
+    "token": "raw_token_from_email_url"
+  }'
+```
+
+Respuesta: `access_token`, `refresh_token`, `user.is_new` (`true` y HTTP **201** cuando la cuenta se creó o entró por primera vez; `false` y **200** cuando ya existía) — guardar los tokens en storage seguro, **nunca** en URL.
+
+Un correo de una cuenta nacida por OAuth (Google, Apple…) con correo verificado por el proveedor **no crea otra cuenta**: el request cuelga la identidad de correo del mismo usuario y el claim responde 200, `is_new: false`, con el `user.id` de siempre.
+
+Luego redirigir a `redirect_path`.
+
+---
+
+## Flujo frontend
+
+```typescript
+// 1. Pantalla login
+await fetch(`${BASE_URL}/api/v1/emails/magic-link/request`, {
+  method: "POST",
+  headers: { "Content-Type": "application/json", "X-API-Key": pk },
+  body: JSON.stringify({ email, redirect_path: "/dashboard" }),
+});
+
+// 2. Página /auth/verify
+const raw = new URLSearchParams(location.search).get("token");
+const res = await fetch(`${BASE_URL}/api/v1/emails/magic-link/claim`, {
+  method: "POST",
+  headers: { "Content-Type": "application/json", "X-API-Key": pk },
+  body: JSON.stringify({ token: raw }),
+});
+const { data } = await res.json();
+saveSession(data.access_token, data.refresh_token);
+router.push("/dashboard");
+```
+
+---
+
+## Errores
+
+| HTTP | Causa |
+|------|-------|
+| 422 | Magic link no activo |
+| 400/401 | Token inválido, expirado o ya usado |
+| 404 | Email no encontrado (según config) |
+
+Ver [behaviors.md](behaviors.md).

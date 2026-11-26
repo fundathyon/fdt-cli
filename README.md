@@ -36,6 +36,30 @@ release y no instalan nada si no coincide. También puedes descargar a mano el
 archivo de tu plataforma desde
 [Releases](https://github.com/fundathyon/fdt-cli/releases).
 
+### Todo de una vez: CLI, login y skills
+
+En macOS y Linux, `setup.sh` instala el CLI (con `install.sh`, verificando el
+SHA256), inicia sesión en el navegador y deja todas las skills para agentes en
+tu usuario (`fdt skills add all --global`: `~/.claude/skills` y
+`~/.agents/skills`):
+
+```sh
+curl -fsSL https://github.com/fundathyon/fdt-cli/releases/latest/download/setup.sh | sh
+```
+
+Si ya tienes sesión, no vuelve a pedirla. Además de las variables de arriba:
+
+| Variable | Para qué |
+|---|---|
+| `FDT_TOKEN` | Inicia sesión con este token `fdt_…` en vez del navegador (agentes, CI) |
+| `FDT_NO_BROWSER=1` | No abre el navegador; solo muestra la URL y el código |
+| `FDT_SKIP_LOGIN=1` | No inicia sesión |
+| `FDT_SKIP_SKILLS=1` | No instala las skills |
+| `FDT_AGENTS` | Skills solo para estos agentes: `claude,codex,cursor,copilot` |
+
+Sin terminal y sin `FDT_TOKEN`, el login falla y dice cómo seguir. Al terminar
+muestra los primeros comandos y prompts listos para pegar en tu agente.
+
 Plataformas: macOS (Apple silicon e Intel), Linux x86_64 y arm64 (binario
 estático) y Windows x64. En otras, compílalo:
 `cargo install --git https://github.com/fundathyon/fdt-cli`.
@@ -286,6 +310,24 @@ fdt skills add fdt-basics -g --agent claude   # en ~/.claude/skills
 fdt skills update              # reinstala las que puso fdt
 fdt skills add all --from ./skills            # desde una carpeta en vez del binario
 ```
+
+| Skill | Para qué |
+|---|---|
+| `fdt-basics` | Reglas base: sesión, contexto, `--json`, códigos de salida, permisos |
+| `fdt-deploy` | Llevar un repo de GitHub a producción |
+| `fdt-databases` | Crear una base de datos y conectarla a un servicio |
+| `fdt-troubleshoot` | Diagnosticar un deploy o un servicio que falla |
+| `accounts-integration` | Integrar login, registro, tokens, OAuth y demás de Foundathyon Accounts |
+
+`accounts-integration` es una copia de `.agents/accounts-integration` del repo
+`fundathyon/accounts`. Para traer la última versión:
+`scripts/sync-accounts-skill.sh <checkout de accounts> [ref]` (por defecto
+`origin/develop`).
+
+fdt nunca reemplaza una skill que no instaló él. Antes de escribir nada
+revisa si ya existe una carpeta con el mismo nombre o otra skill que declare
+el mismo `name:` en su `SKILL.md`; esas las salta con un aviso (y en
+`skipped` con `--json`) e instala el resto.
 
 ## Variables de entorno
 

@@ -5,6 +5,8 @@ al publicar el tag; aquí queda lo que cambia para quien usa el CLI.
 
 ## [Unreleased]
 
+## [0.1.4] - 2026-11-25
+
 - `setup.sh`: instala el CLI, inicia sesión y deja todas las skills en tu usuario en un solo comando (`curl -fsSL …/releases/latest/download/setup.sh | sh`); al terminar da la bienvenida y sugiere prompts para empezar con tu agente (desplegar, crear una base de datos, una app con Foundathyon Accounts, revisar deploys); se publica con cada release ([#12](https://github.com/fundathyon/fdt-cli/pull/12)).
 - `skills add|update` ya no se cortan a la mitad si chocan con una skill que no instaló fdt: revisan antes de escribir, saltan la carpeta con el mismo nombre o la skill que declara el mismo `name:`, avisan dónde está e instalan el resto (`skipped` en `--json`) ([#12](https://github.com/fundathyon/fdt-cli/pull/12)).
 - Nueva skill `accounts-integration` (0.33.0, de `fundathyon/accounts`): el agente sabe integrar signup, signin, tokens, OAuth, magic link, MFA, webhooks y RBAC de Foundathyon Accounts; `scripts/sync-accounts-skill.sh` la actualiza desde un checkout de accounts ([#12](https://github.com/fundathyon/fdt-cli/pull/12)).

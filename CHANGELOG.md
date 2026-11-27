@@ -5,6 +5,8 @@ al publicar el tag; aquí queda lo que cambia para quien usa el CLI.
 
 ## [Unreleased]
 
+- `fdt-deploy` (0.7.1): el modo `dockerize` ya no ejecuta Docker. Antes, si Docker estaba disponible, el agente corría `docker build` y `docker run` para probar el Dockerfile, y podía intentar arrancar Docker. El build real corre en GitHub Actions; si la persona quiere probar en local, el agente le da el comando ([#21](https://github.com/fundathyon/fdt-cli/pull/21)).
+
 ## [0.1.6] - 2026-11-26
 
 - `fdt-deploy` (0.7.0) tiene modo `dockerize` (`/fdt-deploy dockerize`): el agente solo lee el repo y dice dónde está o dónde va el Dockerfile, el build context, el puerto, el host, la ruta de salud, el comando de arranque y las variables; revisa el Dockerfile regla por regla, propone los flags de `fdt service create` y solo escribe el Dockerfile y el `.dockerignore` si la persona dice que sí ([#18](https://github.com/fundathyon/fdt-cli/pull/18)).

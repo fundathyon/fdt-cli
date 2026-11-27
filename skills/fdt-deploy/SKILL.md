@@ -3,7 +3,7 @@ name: fdt-deploy
 description: Lleva un repo de GitHub a producción en Foundathyon de punta a punta con `fdt`: Dockerfile, proyecto, servicio, workflow de GitHub Actions, variables y secretos, `fdt deploy --wait` y verificación. Actívala cuando la persona diga "despliega esta app", "súbela a Foundathyon", "crea el servicio", "pon esto en producción" o quiera el primer deploy de un repo. Para redeploys de un servicio ya vivo basta fdt-basics.
 argument-hint: "[dockerize]"
 metadata:
-  version: "0.7.0"
+  version: "0.7.1"
   owner: fundathyon
 ---
 
@@ -121,11 +121,12 @@ de `fdt`.
    `data.setup.recommended_dockerfile`). `.dockerignore` con `.git`, `.env*`
    (y `!.env.example` si la app lo lee) más lo del stack: Node `node_modules`,
    `.next`, `dist`; Python `__pycache__`, `.venv`; Go/Rust el binario o
-   `target`. Si Docker está disponible, compruébalo
-   con `docker build -f <dockerfile> <context>` y, si hay tiempo, `docker run
-   -p <puerto>:<puerto>` + un GET a la ruta de salud; di si no pudiste. Commit
-   y push solo con permiso explícito; recuerda que con el workflow ya instalado
-   ese push dispara un build.
+   `target`. **No ejecutes Docker**: nada de `docker build`, `docker run`,
+   `docker compose` ni arrancar Docker Desktop. El build real corre en GitHub
+   Actions y no hace falta Docker en la máquina; si la persona quiere
+   probarlo en local, dale el comando para que lo corra ella. Commit y push
+   solo con permiso explícito; recuerda que con el workflow ya instalado ese
+   push dispara un build.
 
 Requisito: la organización tiene la GitHub App instalada y el repo accesible
 (se vincula en el panel; no hay comando). Si `service create` falla con
